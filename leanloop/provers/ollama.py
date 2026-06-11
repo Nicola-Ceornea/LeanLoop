@@ -41,6 +41,38 @@ class LocalProver:
         self.cfg = cfg
 
     # ------------------------------------------------------------------ #
+    def health(self, *, timeout: float = 8.0) -> tuple[bool, str]:
+        """Quick liveness check of the prover endpoint + that the model exists.
+        Returns (ok, message). Used by `check-prover`, `doctor`, and the loop's
+        crash-resilience wait."""
+        url = self.cfg.base_url.rstrip("/")
+        try:
+            if self.cfg.backend == "ollama":
+                r = httpx.get(f"{url}/api/tags", timeout=timeout)
+                r.raise_for_status()
+                models = [m.get("name", "") for m in r.json().get("models", [])]
+                if not any(self.cfg.model in m for m in models):
+                    return False, f"reachable but model '{self.cfg.model}' not loaded (have: {models})"
+                return True, f"reachable; model '{self.cfg.model}' present"
+            r = httpx.get(f"{url}/v1/models", timeout=timeout)
+            r.raise_for_status()
+            return True, "reachable (openai-compatible)"
+        except Exception as e:
+            return False, f"unreachable: {e}"
+
+    def running(self, *, timeout: float = 8.0) -> list[dict]:
+        """Ollama GET /api/ps — currently-loaded models with VRAM split, so the
+        doctor can report whether the model is actually on the GPU."""
+        if self.cfg.backend != "ollama":
+            return []
+        try:
+            r = httpx.get(f"{self.cfg.base_url.rstrip('/')}/api/ps", timeout=timeout)
+            r.raise_for_status()
+            return r.json().get("models", [])
+        except Exception:
+            return []
+
+    # ------------------------------------------------------------------ #
     def propose(self, goal: Goal, *, feedback: str = "") -> list[str]:
         """pass@N: draw `samples` candidate files, cycling temperatures."""
         return asyncio.run(self._propose_async(goal, feedback))

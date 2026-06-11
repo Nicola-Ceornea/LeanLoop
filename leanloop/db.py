@@ -32,12 +32,31 @@ CREATE TABLE IF NOT EXISTS solved (
     tier        TEXT,
     proof_text  TEXT
 );
+-- single-row liveness/heartbeat for the current (or last) `leanloop run`, so a
+-- separate `leanloop status` (e.g. over SSH) can tell if a run is alive,
+-- stalled, or finished, and resume from where it left off.
+CREATE TABLE IF NOT EXISTS run_state (
+    id           INTEGER PRIMARY KEY CHECK (id = 1),
+    started_ts   REAL,
+    last_beat_ts REAL,
+    host         TEXT,
+    pid          INTEGER,
+    total        INTEGER,
+    done         INTEGER,
+    queued       INTEGER,
+    current_goal TEXT,
+    finished     INTEGER,
+    finished_ts  REAL
+);
 """
 
 
 class RunDB:
     def __init__(self, path: str):
-        self.conn = sqlite3.connect(path)
+        # WAL so a reader (`status`/`watch`) never blocks the writer (the run).
+        self.conn = sqlite3.connect(path, timeout=30)
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA busy_timeout=30000")
         self.conn.executescript(_SCHEMA)
         self.conn.commit()
 
@@ -69,6 +88,64 @@ class RunDB:
         by_tier = {t: {"attempts": n, "accepted": s or 0} for t, n, s in cur.fetchall()}
         solved = self.conn.execute("SELECT COUNT(*) FROM solved").fetchone()[0]
         return {"solved_goals": solved, "by_tier": by_tier}
+
+    # ---- liveness / heartbeat ---------------------------------------- #
+    def run_begin(self, total: int, host: str, pid: int) -> None:
+        now = time.time()
+        self.conn.execute(
+            "INSERT INTO run_state (id, started_ts, last_beat_ts, host, pid, total,"
+            " done, queued, current_goal, finished, finished_ts)"
+            " VALUES (1,?,?,?,?,?,0,0,'',0,NULL)"
+            " ON CONFLICT(id) DO UPDATE SET started_ts=?, last_beat_ts=?, host=?,"
+            " pid=?, total=?, done=0, queued=0, current_goal='', finished=0, finished_ts=NULL",
+            (now, now, host, pid, total, now, now, host, pid, total))
+        self.conn.commit()
+
+    def run_progress(self, current_goal: str, done: int, queued: int) -> None:
+        self.conn.execute(
+            "UPDATE run_state SET last_beat_ts=?, current_goal=?, done=?, queued=?"
+            " WHERE id=1", (time.time(), current_goal, done, queued))
+        self.conn.commit()
+
+    def run_end(self, done: int | None = None, queued: int | None = None) -> None:
+        now = time.time()
+        if done is None:
+            self.conn.execute(
+                "UPDATE run_state SET finished=1, finished_ts=?, last_beat_ts=? WHERE id=1",
+                (now, now))
+        else:
+            self.conn.execute(
+                "UPDATE run_state SET finished=1, finished_ts=?, last_beat_ts=?,"
+                " done=?, queued=?, current_goal='' WHERE id=1",
+                (now, now, done, queued if queued is not None else 0))
+        self.conn.commit()
+
+    def run_state(self) -> dict | None:
+        cur = self.conn.execute(
+            "SELECT started_ts, last_beat_ts, host, pid, total, done, queued,"
+            " current_goal, finished, finished_ts FROM run_state WHERE id=1")
+        row = cur.fetchone()
+        if not row:
+            return None
+        keys = ["started_ts", "last_beat_ts", "host", "pid", "total", "done",
+                "queued", "current_goal", "finished", "finished_ts"]
+        return dict(zip(keys, row))
+
+    def last_activity_ts(self) -> float | None:
+        """Most recent attempt timestamp — the true liveness signal (Tier 0 logs
+        per tactic, Tier 1 per sample, so this advances every few seconds)."""
+        row = self.conn.execute("SELECT MAX(ts) FROM attempts").fetchone()
+        return row[0] if row and row[0] is not None else None
+
+    def recent_attempts(self, limit: int = 10) -> list[dict]:
+        cur = self.conn.execute(
+            "SELECT ts, goal_name, tier, accepted, build_ok, wall_clock_s, lean_errors"
+            " FROM attempts ORDER BY id DESC LIMIT ?", (limit,))
+        keys = ["ts", "goal_name", "tier", "accepted", "build_ok", "wall_clock_s", "lean_errors"]
+        return [dict(zip(keys, r)) for r in cur.fetchall()]
+
+    def solved_names(self) -> set[str]:
+        return {r[0] for r in self.conn.execute("SELECT goal_name FROM solved")}
 
     def close(self) -> None:
         self.conn.close()

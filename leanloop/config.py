@@ -76,6 +76,11 @@ class LocalProverConfig:
     timeout_s: float = 1200.0
     # verifier-guided self-correction rounds (feed Lean errors back).
     self_correct_rounds: int = 2
+    # crash-resilience: if the prover endpoint goes down mid-run (Ollama OOM /
+    # restart / the GPU box rebooting), wait+retry up to this many seconds for
+    # it to come back before giving up on the local tier for that goal. 0 = no
+    # wait (skip the local tier immediately if unreachable).
+    health_max_wait_s: float = 600.0
 
 
 @dataclass

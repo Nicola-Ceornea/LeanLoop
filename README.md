@@ -41,7 +41,9 @@ verified. A wrong or malicious model output simply fails the gate; nothing
 unverified survives. Models are heuristics; the kernel is the judge.
 
 Design rationale: [`docs/architecture.md`](docs/architecture.md) (the tier
-stack and the acceptance gates) and [`docs/deployment.md`](docs/deployment.md).
+stack and the acceptance gates), [`docs/deployment.md`](docs/deployment.md)
+(VRAM/concurrency/ROCm), and [`docs/operations.md`](docs/operations.md)
+(running unattended over SSH, monitoring, recovery).
 
 ## Status (v0.1 — what actually runs today)
 
@@ -182,6 +184,29 @@ axiom_whitelist = ["keccak256_pure"]
 ```
 
 Everything else — `sorryAx`, surprise axioms, `native_decide` — is rejected.
+
+## Monitoring & recovery (unattended runs over SSH)
+
+Built for long runs on a remote GPU box. Full playbook in
+[`docs/operations.md`](docs/operations.md); the essentials:
+
+```bash
+leanloop doctor                 # preflight: prover up? model ON GPU? lake? disk? queue?
+tmux new -s ll 'leanloop run --apply'   # survives SSH disconnect
+leanloop status --watch         # live: ALIVE/STALLED/FINISHED, done/total, last activity
+```
+
+- **`doctor`** checks the prover endpoint, whether the model is actually
+  GPU-resident (Ollama `/api/ps` — catches the silent partial-CPU slowdown),
+  the `lake` toolchain, disk, and the queue; non-zero exit on hard failures.
+- **`status`/`--watch`** reads the run's sqlite heartbeat (WAL — never blocks the
+  run) and flags **STALLED/DEAD** if no attempt logged in 3 min.
+- **Crash-resilient:** if the prover goes down mid-run (OOM / GPU-box reboot),
+  the loop waits + retries with backoff (`health_max_wait_s`, default 600 s) and
+  resumes automatically. If the *loop* dies, just re-run — solved goals are
+  cached and skipped, so it picks up where it left off.
+- **On the GPU box:** `scripts/gpu_box_status.sh [--watch|--restart|--logs]` —
+  Ollama health, GPU residency, and recovery, over SSH.
 
 ## Run log
 

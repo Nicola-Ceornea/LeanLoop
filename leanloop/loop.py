@@ -73,9 +73,13 @@ class Orchestrator:
 
         # --- Tier 1: local prover pass@N with self-correction ---
         if self.local:
-            outcome = self._prover_rounds(goal, self.local, "local", module_stem)
-            if outcome.accepted:
-                return outcome
+            if self._ensure_prover():
+                outcome = self._prover_rounds(goal, self.local, "local", module_stem)
+                if outcome.accepted:
+                    return outcome
+            else:
+                console.print("[yellow]⚠ local prover unreachable — skipping Tier 1 "
+                              "for this goal[/]")
 
         # --- Tier 2: frontier ---
         fb = self.cfg.prover.frontier
@@ -96,6 +100,32 @@ class Orchestrator:
 
         console.print(f"[yellow]✗ {goal.name}: open after all tiers (flag for review)[/]")
         return GoalOutcome(goal.name, False)
+
+    # ------------------------------------------------------------------ #
+    def _ensure_prover(self) -> bool:
+        """Wait for the local prover to be reachable, surviving a transient
+        Ollama crash/OOM or a GPU-box reboot. Returns False if it stays down
+        past `health_max_wait_s` (the caller then skips Tier 1 for this goal)."""
+        ok, msg = self.local.health()
+        if ok:
+            return True
+        max_wait = self.cfg.prover.local.health_max_wait_s
+        if max_wait <= 0:
+            console.print(f"[yellow]⚠ prover down ({msg})[/]")
+            return False
+        console.print(f"[yellow]⚠ prover down ({msg}) — waiting up to "
+                      f"{int(max_wait)}s for it to recover…[/]")
+        waited, delay = 0.0, 10.0
+        while waited < max_wait:
+            time.sleep(min(delay, max_wait - waited))
+            waited += delay
+            delay = min(delay * 2, 60.0)   # backoff, capped at 60s
+            ok, msg = self.local.health()
+            if ok:
+                console.print(f"[green]✓ prover recovered after {int(waited)}s[/]")
+                return True
+        console.print(f"[red]✗ prover still down after {int(waited)}s[/]")
+        return False
 
     # ------------------------------------------------------------------ #
     def _prover_rounds(self, goal: Goal, prover, tier: str, module_stem: str,

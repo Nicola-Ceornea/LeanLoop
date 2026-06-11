@@ -6,6 +6,8 @@
     leanloop run          [-c cfg] [--apply] [--manifest goals.toml]
                                               run over all goals (the overnight loop)
     leanloop stats        [-c cfg]            run-log summary
+    leanloop doctor       [-c cfg]            preflight health check (prover/GPU/lean/disk)
+    leanloop status       [-c cfg] [--watch]  live status + liveness of the current run
     leanloop frontier     [-c cfg] [--next]   list (or print) interactive-frontier tasks
     leanloop submit GOAL  [-c cfg] [--candidate F]
                                               verify+apply an interactively-written proof
@@ -23,6 +25,7 @@ from rich.table import Table
 from . import goals as goals_mod
 from .config import Config
 from .loop import Orchestrator
+from .provers.ollama import LocalProver
 
 console = Console()
 
@@ -110,26 +113,35 @@ def cmd_run(args) -> int:
     if not found:
         console.print("no goals found")
         return 0
+    import os
+    import socket
     orch = Orchestrator(cfg, config_path=_config_path(args) or "")
     closed = 0
+    orch.db.run_begin(len(found), socket.gethostname(), os.getpid())
     try:
         for dg in found:
+            orch.db.run_progress(dg.goal.name, closed, _queue_pending(cfg))
             outcome = orch.prove(dg.goal, module_stem=dg.module_stem)
             if outcome.accepted:
                 closed += 1
                 if args.apply and outcome.proof_text:
                     dg.path.write_text(outcome.proof_text)
                     console.print(f"[green]applied -> {dg.path}[/]")
+        orch.db.run_end(closed, _queue_pending(cfg))
     finally:
         console.print(f"\n[bold]{closed}/{len(found)} goals closed[/]")
-        pend = len(__import__("leanloop.frontier_queue", fromlist=["list_tasks"]).list_tasks(
-            cfg.frontier_queue_dir, pending_only=True))
+        pend = _queue_pending(cfg)
         if pend:
             console.print(f"[magenta]{pend} goal(s) queued for the interactive frontier — "
                           f"run `leanloop frontier` in a Claude Code session[/]")
         console.print(orch.db.stats())
         orch.close()
     return 0
+
+
+def _queue_pending(cfg) -> int:
+    from . import frontier_queue
+    return len(frontier_queue.list_tasks(cfg.frontier_queue_dir, pending_only=True))
 
 
 def cmd_stats(args) -> int:
@@ -139,6 +151,172 @@ def cmd_stats(args) -> int:
     console.print(db.stats())
     db.close()
     return 0
+
+
+# --------------------------------------------------------------------------- #
+def _ago(ts: float | None) -> str:
+    import time
+    if not ts:
+        return "never"
+    d = max(0, int(time.time() - ts))
+    if d < 60:
+        return f"{d}s ago"
+    if d < 3600:
+        return f"{d // 60}m{d % 60:02d}s ago"
+    return f"{d // 3600}h{(d % 3600) // 60:02d}m ago"
+
+
+def cmd_doctor(args) -> int:
+    """Preflight health check — run before/after SSHing into the box."""
+    import shutil
+    import subprocess
+    from pathlib import Path as _P
+
+    cfg = _load(args)
+    rows: list[tuple[bool, str]] = []      # (ok, message); ok=None => warn
+
+    def ck(ok, msg):
+        rows.append((ok, msg))
+
+    # 1. project / lake
+    root = _P(cfg.project.root)
+    ck(root.exists(), f"project root exists: {root}")
+    lakefile = root / "lakefile.toml"
+    lakefile2 = root / "lakefile.lean"
+    ck(lakefile.exists() or lakefile2.exists(),
+       f"lakefile present in {root}")
+    lake = shutil.which(cfg.project.lake)
+    if lake:
+        try:
+            v = subprocess.run([cfg.project.lake, "--version"], capture_output=True,
+                               text=True, timeout=20).stdout.strip().splitlines()[:1]
+            ck(True, f"lake: {lake} ({v[0] if v else '?'})")
+        except Exception as e:
+            ck(False, f"lake found but `--version` failed: {e}")
+    else:
+        ck(False, f"lake binary '{cfg.project.lake}' not on PATH")
+
+    # 2. prover
+    lp = cfg.prover.local
+    if lp.enabled:
+        prover = LocalProver(lp)
+        ok, msg = prover.health()
+        ck(ok, f"prover ({lp.backend} @ {lp.base_url}): {msg}")
+        for m in prover.running():
+            vram = m.get("size_vram", 0)
+            total = m.get("size", 0) or 1
+            pct = round(100 * vram / total)
+            on_gpu = pct >= 99
+            ck(None if not on_gpu else True,
+               f"loaded '{m.get('name')}': {pct}% on GPU "
+               f"({'GPU-resident' if on_gpu else 'partially on CPU — slow; check ROCm/VRAM'})")
+    else:
+        ck(None, "local prover disabled in config")
+
+    # 3. frontier
+    fb = cfg.prover.frontier
+    if fb.enabled and fb.backend == "claude_cli":
+        ck(bool(shutil.which(fb.command)),
+           f"frontier '{fb.command}' CLI on PATH (metered — see cost modes)")
+    else:
+        ck(True, f"frontier backend: {fb.backend}")
+
+    # 4. disk
+    for label, p in [("project", root), ("db", _P(cfg.db_path).resolve().parent)]:
+        try:
+            free = shutil.disk_usage(p).free / 1e9
+            ck(free > 2.0, f"disk free ({label} {p}): {free:.1f} GB")
+        except Exception as e:
+            ck(None, f"disk check ({label}) failed: {e}")
+
+    # 5. queue + last run
+    pend = _queue_pending(cfg)
+    ck(None if pend else True, f"frontier queue: {pend} pending")
+    _print_run_liveness(cfg)
+
+    # render
+    hard_fail = False
+    for ok, msg in rows:
+        if ok is True:
+            console.print(f"[green]  ✓[/] {msg}")
+        elif ok is None:
+            console.print(f"[yellow]  ⚠[/] {msg}")
+        else:
+            console.print(f"[red]  ✗[/] {msg}"); hard_fail = True
+    console.print(f"\n[bold]{'✗ problems found' if hard_fail else '✓ all good'}[/]")
+    return 1 if hard_fail else 0
+
+
+def _print_run_liveness(cfg) -> None:
+    import time
+    from .db import RunDB
+    db = RunDB(cfg.db_path)
+    try:
+        st = db.run_state()
+        if not st:
+            console.print("[dim]  · no `leanloop run` recorded yet[/]")
+            return
+        last = db.last_activity_ts() or st["last_beat_ts"]
+        age = time.time() - (last or 0)
+        if st["finished"]:
+            console.print(f"[green]  ✓[/] last run FINISHED ({_ago(st['finished_ts'])}); "
+                          f"{st['done']}/{st['total']} closed, host {st['host']}")
+        elif age < 180:
+            console.print(f"[green]  ✓[/] run ALIVE on {st['host']} (pid {st['pid']}): "
+                          f"goal '{st['current_goal']}', {st['done']}/{st['total']} done, "
+                          f"last activity {_ago(last)}")
+        else:
+            console.print(f"[red]  ✗[/] run looks STALLED/DEAD on {st['host']} "
+                          f"(pid {st['pid']}): last activity {_ago(last)}, "
+                          f"stuck on '{st['current_goal']}' ({st['done']}/{st['total']})")
+    finally:
+        db.close()
+
+
+def cmd_status(args) -> int:
+    """Live status of the current/last run (DB-backed; safe to read mid-run)."""
+    import time
+    from .db import RunDB
+
+    def render():
+        db = RunDB(cfg.db_path)
+        try:
+            st = db.run_state()
+            console.rule(f"LeanLoop status — {time.strftime('%H:%M:%S')}")
+            if not st:
+                console.print("no run recorded yet — start one with `leanloop run`")
+            else:
+                last = db.last_activity_ts() or st["last_beat_ts"]
+                age = time.time() - (last or 0)
+                state = ("[green]FINISHED[/]" if st["finished"]
+                         else "[green]ALIVE[/]" if age < 180
+                         else "[red]STALLED/DEAD[/]")
+                console.print(f"state: {state}   host: {st['host']}  pid: {st['pid']}")
+                console.print(f"progress: [bold]{st['done']}/{st['total']}[/] closed, "
+                              f"{st['queued']} queued   current: {st['current_goal'] or '—'}")
+                console.print(f"started {_ago(st['started_ts'])}, last activity {_ago(last)}")
+            console.print(db.stats())
+            console.print("\n[dim]recent attempts:[/]")
+            for a in db.recent_attempts(8):
+                mark = "[green]✓[/]" if a["accepted"] else ("[yellow]·[/]" if a["build_ok"] else "[red]✗[/]")
+                err = (a["lean_errors"] or "").splitlines()[:1]
+                console.print(f"  {mark} {_ago(a['ts']):>10}  {a['tier']:<8} {a['goal_name']:<28}"
+                              f" {a['wall_clock_s']:.0f}s {(err[0][:40] if err else '')}")
+        finally:
+            db.close()
+
+    cfg = _load(args)
+    if not args.watch:
+        render()
+        return 0
+    try:
+        while True:
+            console.clear()
+            render()
+            console.print(f"\n[dim]watching (every {args.interval}s) — Ctrl-C to stop[/]")
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        return 0
 
 
 def cmd_frontier(args) -> int:
@@ -231,6 +409,12 @@ def main(argv: list[str] | None = None) -> int:
     sr.add_argument("--apply", action="store_true")
     sr.add_argument("--manifest", default=None, help="ordered goal manifest (TOML)")
     sub.add_parser("stats", parents=[common], help="run-log summary")
+    sub.add_parser("doctor", parents=[common],
+                   help="preflight health check (prover, GPU, lean, disk, run liveness)")
+    st = sub.add_parser("status", parents=[common],
+                        help="live status of the current/last run")
+    st.add_argument("--watch", action="store_true", help="refresh continuously")
+    st.add_argument("--interval", type=float, default=10.0, help="watch refresh seconds")
     sf = sub.add_parser("frontier", parents=[common],
                         help="list the interactive-frontier queue (backend=queue)")
     sf.add_argument("--next", action="store_true",
@@ -248,6 +432,8 @@ def main(argv: list[str] | None = None) -> int:
         "prove": cmd_prove,
         "run": cmd_run,
         "stats": cmd_stats,
+        "doctor": cmd_doctor,
+        "status": cmd_status,
         "frontier": cmd_frontier,
         "submit": cmd_submit,
     }[args.cmd](args)
