@@ -8,6 +8,8 @@
     leanloop stats        [-c cfg]            run-log summary
     leanloop doctor       [-c cfg]            preflight health check (prover/GPU/lean/disk)
     leanloop status       [-c cfg] [--watch]  live status + liveness of the current run
+    leanloop bench        [-c cfg] [--samples N] [--goals M]
+                                              measure prover tok/s + local close-rate
     leanloop frontier     [-c cfg] [--next]   list (or print) interactive-frontier tasks
     leanloop submit GOAL  [-c cfg] [--candidate F]
                                               verify+apply an interactively-written proof
@@ -319,6 +321,86 @@ def cmd_status(args) -> int:
         return 0
 
 
+def cmd_bench(args) -> int:
+    """Phase-0 benchmark: prover tokens/sec on this GPU + local-tier close-rate."""
+    import time
+    from . import bench as B
+
+    cfg = _load(args)
+    lp = cfg.prover.local
+    if not lp.enabled:
+        console.print("[red]local prover disabled in config — nothing to benchmark[/]")
+        return 2
+    prover = LocalProver(lp)
+    ok, msg = prover.health()
+    if not ok:
+        console.print(f"[red]prover not ready: {msg}[/] (run `leanloop doctor`)")
+        return 1
+
+    # ---- Phase A: raw throughput (no project needed) ----
+    console.rule("throughput probe")
+    console.print(f"model [bold]{lp.model}[/] @ {lp.base_url} — {args.samples} samples "
+                  f"(warming up first)…")
+    try:
+        prover.generate_timed(B.THROUGHPUT_PROMPT, temperature=0.7)  # warm-up (load model)
+    except Exception as e:
+        console.print(f"[red]generation failed: {e}[/]")
+        return 1
+    samples = []
+    for i in range(args.samples):
+        s = prover.generate_timed(B.THROUGHPUT_PROMPT, temperature=lp.temperatures[0])
+        samples.append(s)
+        console.print(f"  sample {i+1}: {s['gen_tps']:.1f} tok/s gen "
+                      f"({s['gen_toks']} toks, {s['total_s']:.1f}s)")
+    tp = B.summarize_throughput(samples)
+    console.print(f"\n[bold]generation: {tp['gen_tps_median']} tok/s median[/] "
+                  f"(mean {tp['gen_tps_mean']}, range {tp['gen_tps_min']}–{tp['gen_tps_max']}); "
+                  f"prompt {tp['prompt_tps_median']} tok/s; ~{tp['gen_toks_median']} toks/proof")
+    for m in prover.running():
+        vram, total = m.get("size_vram", 0), m.get("size", 0) or 1
+        pct = round(100 * vram / total)
+        tag = "GPU-resident" if pct >= 99 else "[red]PARTIAL CPU — speed is capped[/]"
+        console.print(f"residency: '{m.get('name')}' {pct}% on GPU ({tag})")
+    if tp["gen_tps_median"] > 0:
+        per = tp["gen_toks_median"] / tp["gen_tps_median"]
+        console.print(f"[dim]≈ {per:.0f}s per sample → pass@{lp.samples} ≈ "
+                      f"{per * lp.samples / max(lp.concurrency, 1) / 60:.0f} min/goal "
+                      f"at concurrency {lp.concurrency}[/]")
+
+    # ---- Phase B: close-rate over real goals (needs a project with sorries) ----
+    if args.goals and args.goals > 0:
+        found = goals_mod.scan(cfg.project.root)[: args.goals]
+        if not found:
+            console.print("\n[yellow]no goals (sorries) in the project — skipping close-rate. "
+                          "Point project.root at an Aeneas Lean project to measure it.[/]")
+        else:
+            console.rule(f"close-rate (local tier only, {len(found)} goals)")
+            cfg.prover.frontier.enabled = False   # measure the LOCAL stack's yield
+            orch = Orchestrator(cfg, config_path=_config_path(args) or "")
+            rows = []
+            try:
+                for dg in found:
+                    t0 = time.time()
+                    out = orch.prove(dg.goal, module_stem=dg.module_stem)
+                    rows.append({"tier": out.tier, "accepted": out.accepted,
+                                 "wall_s": time.time() - t0})
+                    mark = "✓" if out.accepted else "✗"
+                    console.print(f"  {mark} {dg.module_stem} [{out.tier or 'open'}] "
+                                  f"{rows[-1]['wall_s']:.0f}s")
+            finally:
+                orch.close()
+            cr = B.summarize_closerate(rows)
+            console.print(f"\n[bold]close-rate: {cr['close_rate']}%[/] "
+                          f"({cr['closed']}/{cr['goals']}) — "
+                          f"{cr['by_tactic']} by tactic battery, "
+                          f"{cr['by_local_prover']} by the prover, {cr['open']} open; "
+                          f"median {cr['wall_s_median']}s/goal, {cr['wall_s_total']}s total")
+    else:
+        console.print("\n[dim]close-rate skipped (pass --goals N to measure it on the "
+                      "project's sorries).[/]")
+    return 0
+
+
 def cmd_frontier(args) -> int:
     """List the interactive-frontier queue, or print the next task's prompt."""
     from . import frontier_queue
@@ -415,6 +497,11 @@ def main(argv: list[str] | None = None) -> int:
                         help="live status of the current/last run")
     st.add_argument("--watch", action="store_true", help="refresh continuously")
     st.add_argument("--interval", type=float, default=10.0, help="watch refresh seconds")
+    sb = sub.add_parser("bench", parents=[common],
+                        help="Phase-0 benchmark: prover tok/s + local close-rate")
+    sb.add_argument("--samples", type=int, default=5, help="throughput probe samples")
+    sb.add_argument("--goals", type=int, default=0,
+                    help="also measure local close-rate over N project goals")
     sf = sub.add_parser("frontier", parents=[common],
                         help="list the interactive-frontier queue (backend=queue)")
     sf.add_argument("--next", action="store_true",
@@ -434,6 +521,7 @@ def main(argv: list[str] | None = None) -> int:
         "stats": cmd_stats,
         "doctor": cmd_doctor,
         "status": cmd_status,
+        "bench": cmd_bench,
         "frontier": cmd_frontier,
         "submit": cmd_submit,
     }[args.cmd](args)

@@ -40,10 +40,11 @@ closure inside the allowed set, **failing closed** if the closure can't be
 verified. A wrong or malicious model output simply fails the gate; nothing
 unverified survives. Models are heuristics; the kernel is the judge.
 
-Design rationale: [`docs/architecture.md`](docs/architecture.md) (the tier
-stack and the acceptance gates), [`docs/deployment.md`](docs/deployment.md)
-(VRAM/concurrency/ROCm), and [`docs/operations.md`](docs/operations.md)
-(running unattended over SSH, monitoring, recovery).
+Design + ops docs: [`architecture.md`](docs/architecture.md) (tier stack +
+gates), [`gpu-box-setup.md`](docs/gpu-box-setup.md) (AMD ROCm + Ollama +
+**Tailscale** for the remote prover box), [`deployment.md`](docs/deployment.md)
+(VRAM/concurrency tuning), and [`operations.md`](docs/operations.md) (unattended
+runs over SSH, monitoring, recovery).
 
 ## Status (v0.1 — what actually runs today)
 
@@ -116,18 +117,22 @@ The loop + Lean run on your main machine; inference runs on a second box with
 a GPU (tested target: AMD RX 6950 XT, 16 GB — Goedel-8B Q8_0 fits with ~7 GB
 to spare for KV cache). The *only* config difference is the URL.
 
-**On the GPU box** (e.g. the 6950 XT machine):
+**On the GPU box** (e.g. the 6950 XT machine) — full walkthrough incl. AMD ROCm
+and **Tailscale** (so the boxes can be on different networks, encrypted, no
+port-forwarding) is in [`docs/gpu-box-setup.md`](docs/gpu-box-setup.md). Quick
+version for a same-LAN setup:
 
 ```bash
 bash scripts/setup_prover_host.sh --serve-lan
-# installs Ollama, downloads + imports the model, and sets OLLAMA_HOST=0.0.0.0
-# so the server listens on the LAN. Open the firewall for your loop machine:
+# installs Ollama, downloads + imports the model, sets OLLAMA_HOST=0.0.0.0.
 sudo ufw allow from <loop-machine-ip> to any port 11434 proto tcp
 ```
 
 AMD RDNA2 note: if `ollama ps` shows CPU instead of GPU, set
 `HSA_OVERRIDE_GFX_VERSION=10.3.0` for the Ollama service (gfx1030 — the exact
-override is printed by the setup script).
+override is printed by the setup script). **Recommended: connect over Tailscale**
+and firewall 11434 to the `tailscale0` interface (see the setup guide) — the
+Ollama API is unauthenticated, so don't expose it on the open LAN/internet.
 
 VRAM / context / concurrency tuning (they interact — Ollama shares one context
 budget across parallel slots) is in **`docs/deployment.md`**.
@@ -192,6 +197,8 @@ Built for long runs on a remote GPU box. Full playbook in
 
 ```bash
 leanloop doctor                 # preflight: prover up? model ON GPU? lake? disk? queue?
+leanloop bench --samples 5      # Phase 0: tokens/sec on this GPU + per-goal time estimate
+#                                 (add --goals N to also measure local close-rate)
 tmux new -s ll 'leanloop run --apply'   # survives SSH disconnect
 leanloop status --watch         # live: ALIVE/STALLED/FINISHED, done/total, last activity
 ```

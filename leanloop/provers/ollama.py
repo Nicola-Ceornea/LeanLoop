@@ -73,6 +73,44 @@ class LocalProver:
             return []
 
     # ------------------------------------------------------------------ #
+    def generate_timed(self, prompt: str, *, temperature: float = 0.7) -> dict:
+        """One generation with timing metrics, for `leanloop bench`. Ollama
+        returns token counts + nanosecond durations; we derive tokens/sec.
+        Returns {text, gen_toks, gen_tps, prompt_toks, prompt_tps, total_s}."""
+        url = self.cfg.base_url.rstrip("/")
+        with httpx.Client(timeout=self.cfg.timeout_s) as client:
+            if self.cfg.backend == "ollama":
+                r = client.post(f"{url}/api/generate", json={
+                    "model": self.cfg.model, "prompt": prompt, "stream": False,
+                    "options": {"temperature": temperature, "top_p": self.cfg.top_p,
+                                "num_predict": self.cfg.max_tokens, "num_ctx": self.cfg.num_ctx},
+                })
+                r.raise_for_status()
+                d = r.json()
+                ev, evd = d.get("eval_count", 0), d.get("eval_duration", 0) or 1
+                pv, pvd = d.get("prompt_eval_count", 0), d.get("prompt_eval_duration", 0) or 1
+                return {
+                    "text": d.get("response", ""),
+                    "gen_toks": ev, "gen_tps": ev / (evd / 1e9),
+                    "prompt_toks": pv, "prompt_tps": pv / (pvd / 1e9),
+                    "total_s": (d.get("total_duration", 0) or 0) / 1e9,
+                }
+            # openai-compatible: usage if present, else just wall time
+            import time as _t
+            t0 = _t.time()
+            headers = {"Authorization": f"Bearer {self.cfg.api_key}"} if self.cfg.api_key else {}
+            r = client.post(f"{url}/v1/chat/completions", headers=headers, json={
+                "model": self.cfg.model, "messages": [{"role": "user", "content": prompt}],
+                "temperature": temperature, "max_tokens": self.cfg.max_tokens})
+            r.raise_for_status()
+            d = r.json()
+            dt = max(_t.time() - t0, 1e-6)
+            ct = d.get("usage", {}).get("completion_tokens", 0)
+            return {"text": d["choices"][0]["message"]["content"], "gen_toks": ct,
+                    "gen_tps": ct / dt if ct else 0.0, "prompt_toks":
+                    d.get("usage", {}).get("prompt_tokens", 0), "prompt_tps": 0.0, "total_s": dt}
+
+    # ------------------------------------------------------------------ #
     def propose(self, goal: Goal, *, feedback: str = "") -> list[str]:
         """pass@N: draw `samples` candidate files, cycling temperatures."""
         return asyncio.run(self._propose_async(goal, feedback))
