@@ -74,3 +74,25 @@ def test_ago_formatting():
     assert _ago(now).endswith("s ago")
     assert "m" in _ago(now - 125)
     assert "h" in _ago(now - 7400)
+
+
+def test_solved_cache_invalidated_on_goal_change(tmp_path):
+    """Footgun found 2026-06-11: solved was keyed by name only — a module that
+    gained a NEW sorry after being solved was skipped as 'cached'. The cache
+    must miss when the goal content hash changes."""
+    db = RunDB(str(tmp_path / "r.sqlite"))
+    a = _att("Mod.A", "tactic", accepted=True)
+    db.log(a, goal_hash="hash-v1")
+    assert db.is_solved("Mod.A", "hash-v1")          # same content -> hit
+    assert not db.is_solved("Mod.A", "hash-v2")      # changed content -> MISS
+    assert not db.is_solved("Mod.B", "hash-v1")
+    db.close()
+
+
+def test_solved_cache_legacy_rows_still_hit_without_hash(tmp_path):
+    # rows from pre-hash DBs (empty goal_hash) keep matching empty-hash queries
+    db = RunDB(str(tmp_path / "r.sqlite"))
+    db.log(_att("Mod.Old", "tactic", accepted=True), goal_hash="")
+    assert db.is_solved("Mod.Old", "")
+    assert not db.is_solved("Mod.Old", "newhash")    # but never a hashed query
+    db.close()

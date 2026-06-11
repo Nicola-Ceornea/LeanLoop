@@ -30,7 +30,8 @@ CREATE TABLE IF NOT EXISTS solved (
     goal_name   TEXT PRIMARY KEY,
     ts          REAL,
     tier        TEXT,
-    proof_text  TEXT
+    proof_text  TEXT,
+    goal_hash   TEXT DEFAULT ''
 );
 -- single-row liveness/heartbeat for the current (or last) `leanloop run`, so a
 -- separate `leanloop status` (e.g. over SSH) can tell if a run is alive,
@@ -58,9 +59,14 @@ class RunDB:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA busy_timeout=30000")
         self.conn.executescript(_SCHEMA)
+        # migration: DBs created before goal_hash existed lack the column
+        try:
+            self.conn.execute("ALTER TABLE solved ADD COLUMN goal_hash TEXT DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass  # column already exists
         self.conn.commit()
 
-    def log(self, a: ProofAttempt) -> None:
+    def log(self, a: ProofAttempt, *, goal_hash: str = "") -> None:
         self.conn.execute(
             "INSERT INTO attempts (ts, goal_name, tier, model, accepted, build_ok,"
             " audit_ok, wall_clock_s, sampling, lean_errors, axioms, proof_text)"
@@ -72,15 +78,23 @@ class RunDB:
         )
         if a.accepted:
             self.conn.execute(
-                "INSERT OR REPLACE INTO solved (goal_name, ts, tier, proof_text)"
-                " VALUES (?,?,?,?)",
-                (a.goal_name, time.time(), a.tier, a.proof_text),
+                "INSERT OR REPLACE INTO solved (goal_name, ts, tier, proof_text, goal_hash)"
+                " VALUES (?,?,?,?,?)",
+                (a.goal_name, time.time(), a.tier, a.proof_text, goal_hash),
             )
         self.conn.commit()
 
-    def is_solved(self, goal_name: str) -> bool:
-        cur = self.conn.execute("SELECT 1 FROM solved WHERE goal_name=?", (goal_name,))
-        return cur.fetchone() is not None
+    def is_solved(self, goal_name: str, goal_hash: str = "") -> bool:
+        """Solved only counts for the SAME goal content. If the module later
+        gains a new `sorry` (different hash), the cache must miss — otherwise a
+        re-run would skip it and falsely report the goal closed."""
+        cur = self.conn.execute(
+            "SELECT goal_hash FROM solved WHERE goal_name=?", (goal_name,))
+        row = cur.fetchone()
+        if row is None:
+            return False
+        stored = row[0] or ""
+        return stored == goal_hash if (stored or goal_hash) else True
 
     def stats(self) -> dict:
         cur = self.conn.execute(

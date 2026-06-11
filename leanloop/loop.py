@@ -8,6 +8,7 @@ Nothing a model emits can bypass this.
 """
 from __future__ import annotations
 
+import hashlib
 import time
 from dataclasses import dataclass
 
@@ -44,11 +45,14 @@ class Orchestrator:
         self.frontier = (FrontierProver(fb)
                          if fb.enabled and fb.backend in ("claude_cli", "openai") else None)
         self._goal_sigs: dict[str, str] = {}   # pinned per goal in prove()
+        self._goal_hash: str = ""              # content hash, keys the solved cache
         self._last_feedback: str = ""          # best local failure, for queued tasks
 
     # ------------------------------------------------------------------ #
     def prove(self, goal: Goal, *, module_stem: str) -> GoalOutcome:
-        if self.db.is_solved(goal.name):
+        goal_hash = hashlib.sha256(goal.file_text.encode()).hexdigest()[:16]
+        self._goal_hash = goal_hash
+        if self.db.is_solved(goal.name, goal_hash):
             console.print(f"[dim]{goal.name}: already solved (cached)[/]")
             return GoalOutcome(goal.name, True, "cached")
 
@@ -162,6 +166,7 @@ class Orchestrator:
         """Verify a candidate produced OUTSIDE the loop (e.g. by an interactive
         Claude Code session clearing the frontier queue) through the SAME gates.
         Returns the attempt; the caller applies it on acceptance."""
+        self._goal_hash = hashlib.sha256(goal.file_text.encode()).hexdigest()[:16]
         self._goal_sigs = theorem_signatures(goal.file_text)
         if not self._goal_sigs:
             att = ProofAttempt(goal_name=goal.name, tier="frontier", proof_text=candidate)
@@ -181,7 +186,7 @@ class Orchestrator:
             if reason:
                 att.lean_errors = reason
             att.wall_clock_s = time.time() - t0
-            self.db.log(att)
+            self.db.log(att, goal_hash=self._goal_hash)
             return att
 
         # 1) STATEMENT-PINNING gate: the candidate must contain every goal
