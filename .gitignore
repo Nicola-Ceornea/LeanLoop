@@ -9,3 +9,6 @@ leanloop_runs.sqlite
 # firmware-describing design inputs — keep local-only (firmware private / tool public)
 docs/founding-design-document.md
 docs/architecture-transcript.txt
+
+# interactive-frontier work queue (per-run, local)
+leanloop_frontier_queue/

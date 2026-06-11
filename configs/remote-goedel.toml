@@ -21,7 +21,9 @@ timeout_s = 1200                         # generous: big proofs + LAN
 
 [prover.frontier]
 enabled = true
-backend = "claude_cli"
+backend = "queue"        # FREE interactive-frontier handoff; see docs.
+# backend = "claude_cli" # unattended but metered
+# backend = "none"       # local-only
 
 [audit]
 axiom_whitelist = []

@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 from rich.console import Console
 
-from . import audit, tactic_battery
+from . import audit, frontier_queue, tactic_battery
 from .config import Config
 from .db import RunDB
 from .lean_runner import LeanRunner, theorem_signatures
@@ -33,13 +33,18 @@ class GoalOutcome:
 
 
 class Orchestrator:
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, *, config_path: str = ""):
         self.cfg = cfg
+        self.config_path = config_path     # surfaced in queued-task instructions
         self.runner = LeanRunner(cfg.project)
         self.db = RunDB(cfg.db_path)
         self.local = LocalProver(cfg.prover.local) if cfg.prover.local.enabled else None
-        self.frontier = FrontierProver(cfg.prover.frontier) if cfg.prover.frontier.enabled else None
+        fb = cfg.prover.frontier
+        # `queue` is handled by the loop directly (enqueue), not a Prover.
+        self.frontier = (FrontierProver(fb)
+                         if fb.enabled and fb.backend in ("claude_cli", "openai") else None)
         self._goal_sigs: dict[str, str] = {}   # pinned per goal in prove()
+        self._last_feedback: str = ""          # best local failure, for queued tasks
 
     # ------------------------------------------------------------------ #
     def prove(self, goal: Goal, *, module_stem: str) -> GoalOutcome:
@@ -72,8 +77,18 @@ class Orchestrator:
             if outcome.accepted:
                 return outcome
 
-        # --- Tier 2: frontier hands-off ---
-        if self.frontier and self.cfg.prover.frontier.enabled:
+        # --- Tier 2: frontier ---
+        fb = self.cfg.prover.frontier
+        if fb.enabled and fb.backend == "queue":
+            # hand off to an interactive Claude Code session (flat-rate)
+            task = frontier_queue.enqueue(
+                goal, module_stem=module_stem, project_root=str(self.runner.root),
+                queue_dir=self.cfg.frontier_queue_dir, config_path=self.config_path,
+                allowed_axioms=self.cfg.audit.allowed_kernel_axioms,
+                whitelist=self.cfg.audit.axiom_whitelist, feedback=self._last_feedback)
+            console.print(f"[magenta]→ queued for interactive frontier:[/] {task.md_path}")
+            return GoalOutcome(goal.name, False, "queued")
+        if self.frontier:
             outcome = self._prover_rounds(goal, self.frontier, "frontier", module_stem,
                                           rounds=self.cfg.prover.local.self_correct_rounds)
             if outcome.accepted:
@@ -105,9 +120,25 @@ class Orchestrator:
                 elif att.lean_errors and not best_errors:
                     best_errors = att.lean_errors
             feedback = best_errors  # feed the most informative failure into next round
+            if best_errors:
+                self._last_feedback = best_errors  # context for a queued frontier task
             if not candidates:
                 break
         return GoalOutcome(goal.name, False)
+
+    # ------------------------------------------------------------------ #
+    def submit(self, goal: Goal, candidate: str, *, module_stem: str,
+               model: str = "interactive-frontier") -> ProofAttempt:
+        """Verify a candidate produced OUTSIDE the loop (e.g. by an interactive
+        Claude Code session clearing the frontier queue) through the SAME gates.
+        Returns the attempt; the caller applies it on acceptance."""
+        self._goal_sigs = theorem_signatures(goal.file_text)
+        if not self._goal_sigs:
+            att = ProofAttempt(goal_name=goal.name, tier="frontier", proof_text=candidate)
+            att.lean_errors = "goal declares no named theorem/lemma to pin"
+            return att
+        return self._verify(goal, candidate, tier="frontier", module_stem=module_stem,
+                            model=model)
 
     # ------------------------------------------------------------------ #
     def _verify(self, goal: Goal, candidate: str, *, tier: str, module_stem: str,

@@ -16,8 +16,9 @@ LeanLoop takes an Aeneas-generated Lean 4 project plus a list of proof goals
                 │   pass@N sampling + verifier-guided            │
                 │   self-correction; via Ollama — local OR remote│
                 ├────────────────────────────────────────────────┤
-                │ Tier 2  FRONTIER (claude CLI, sparse)          │
-                │   whole-proof + repair on hard goals           │
+                │ Tier 2  FRONTIER (sparse) — pick one:          │
+                │   queue→interactive Claude Code (free) ·       │
+                │   claude -p (metered) · openai · none          │
                 └───────────────┬────────────────────────────────┘
                                 ▼
                 ┌────────────────────────────────────────────────┐
@@ -50,7 +51,9 @@ the kernel gate; the audit gate including **statement-pinning** (a candidate
 must prove the goal's exact theorem name + signature — not a weakened one),
 no-`sorry`/`admit`, no candidate-declared `axiom`s, no `native_decide`, and a
 **fail-closed** `#print axioms` closure check; goal scan + ordered manifests;
-the sqlite run log; single-machine and remote-Ollama deployment. The soundness
+the sqlite run log; single-machine and remote-Ollama deployment; and a
+**free interactive-frontier mode** (queue hard goals for a flat-rate Claude Code
+session via `/leanloop-frontier` + `leanloop submit`). The soundness
 gate is validated end-to-end against a real Lean toolchain
 (`tests/test_soundness.py`).
 
@@ -187,14 +190,51 @@ goal, tier, model, sampling params, Lean errors, axiom closure, wall-clock.
 That's the triage trail *and* the future expert-iteration (QLoRA) corpus.
 `leanloop stats` summarizes per-tier yield.
 
-## Cost notes
+## Cost modes (the frontier tier)
 
-* **Tier 0 and Tier 1 are free** (your hardware).
-* The frontier tier shells out to `claude -p`. Anthropic's June 15, 2026
-  billing change moved headless CLI calls to a metered credit pool ($20–$200
-  monthly allotment by plan) — that's why the architecture keeps the frontier
-  tier *sparse* (~5–10 % of calls) and the local prover does the volume.
-  Disable it entirely with `backend = "none"` or `LEANLOOP_FRONTIER_DISABLE=1`.
+**Tier 0 and Tier 1 are always free** (your hardware). Only the frontier tier
+can cost money, and you pick how via `[prover.frontier] backend`:
+
+| `backend` | what happens | cost |
+|-----------|--------------|------|
+| `"queue"` | hard goals are **queued for an interactive Claude Code session** to clear | **free** — interactive Claude Code is subscription flat-rate |
+| `"claude_cli"` | the loop calls headless `claude -p` automatically | metered: headless CLI uses the credit pool ($20–$200/mo by plan, post 2026-06-15) |
+| `"openai"` | an OpenAI-compatible endpoint | pay per token |
+| `"none"` | no frontier tier (local-only) | free |
+
+### `queue` — use interactive Claude Code (flat-rate) as the frontier
+
+This is the cheapest way to get frontier-quality proofs. The billing split is
+the reason it exists: **headless** `claude -p` draws on the metered credit pool,
+but an **interactive** Claude Code session stays on your subscription flat-rate.
+So the loop hands hard goals off to you instead of spending credits:
+
+```toml
+[prover.frontier]
+backend = "queue"
+```
+
+```bash
+# the overnight loop runs Tier 0 + local prover, and QUEUES what it can't close:
+leanloop run --apply
+#   → N goal(s) queued for the interactive frontier
+
+# then, in an interactive Claude Code session in the SAME dir:
+/leanloop-frontier            # the bundled slash command clears the queue
+# …or drive it by hand:
+leanloop frontier             # list pending tasks
+leanloop frontier --next      # print the next task's prompt (goal + criteria)
+#   write the proof to the task's <goal>.candidate.lean, then:
+leanloop submit <goal>        # re-verifies through ALL gates; applies on pass
+```
+
+`leanloop submit` runs the **exact same** statement-pin + audit + kernel +
+axiom-closure gates as the automated tiers — so a proof produced in an
+interactive session is just as sound (a cheat or a `sorry` is rejected the same
+way). The tradeoff vs `claude_cli`: `queue` is free but not unattended (you, or
+a Claude Code session you start, clear the queue); `claude_cli` is unattended
+but metered. You can also disable the frontier entirely with `backend = "none"`
+or `LEANLOOP_FRONTIER_DISABLE=1`.
 
 ## Trust chain (what a green run does and doesn't mean)
 

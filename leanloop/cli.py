@@ -6,6 +6,9 @@
     leanloop run          [-c cfg] [--apply] [--manifest goals.toml]
                                               run over all goals (the overnight loop)
     leanloop stats        [-c cfg]            run-log summary
+    leanloop frontier     [-c cfg] [--next]   list (or print) interactive-frontier tasks
+    leanloop submit GOAL  [-c cfg] [--candidate F]
+                                              verify+apply an interactively-written proof
 """
 from __future__ import annotations
 
@@ -24,11 +27,15 @@ from .loop import Orchestrator
 console = Console()
 
 
-def _load(args) -> Config:
-    path = args.config
+def _config_path(args) -> str | None:
+    path = getattr(args, "config", None)
     if path is None and Path("leanloop.toml").exists():
         path = "leanloop.toml"
-    return Config.load(path)
+    return path
+
+
+def _load(args) -> Config:
+    return Config.load(_config_path(args))
 
 
 # --------------------------------------------------------------------------- #
@@ -82,7 +89,7 @@ def cmd_prove(args) -> int:
     from .provers.base import Goal
     goal = Goal(name=args.module, file_text=path.read_text(), target_module=args.module,
                 context=args.context or "")
-    orch = Orchestrator(cfg)
+    orch = Orchestrator(cfg, config_path=_config_path(args) or "")
     try:
         outcome = orch.prove(goal, module_stem=args.module)
     finally:
@@ -103,7 +110,7 @@ def cmd_run(args) -> int:
     if not found:
         console.print("no goals found")
         return 0
-    orch = Orchestrator(cfg)
+    orch = Orchestrator(cfg, config_path=_config_path(args) or "")
     closed = 0
     try:
         for dg in found:
@@ -115,6 +122,11 @@ def cmd_run(args) -> int:
                     console.print(f"[green]applied -> {dg.path}[/]")
     finally:
         console.print(f"\n[bold]{closed}/{len(found)} goals closed[/]")
+        pend = len(__import__("leanloop.frontier_queue", fromlist=["list_tasks"]).list_tasks(
+            cfg.frontier_queue_dir, pending_only=True))
+        if pend:
+            console.print(f"[magenta]{pend} goal(s) queued for the interactive frontier — "
+                          f"run `leanloop frontier` in a Claude Code session[/]")
         console.print(orch.db.stats())
         orch.close()
     return 0
@@ -129,12 +141,79 @@ def cmd_stats(args) -> int:
     return 0
 
 
+def cmd_frontier(args) -> int:
+    """List the interactive-frontier queue, or print the next task's prompt."""
+    from . import frontier_queue
+    cfg = _load(args)
+    pending = frontier_queue.list_tasks(cfg.frontier_queue_dir, pending_only=True)
+    if args.next:
+        if not pending:
+            console.print("[green]frontier queue empty — nothing to do[/]")
+            return 0
+        # print the raw markdown so an interactive Claude Code session can act on it
+        console.print(pending[0].md_path.read_text())
+        return 0
+    if not pending:
+        console.print("[green]frontier queue empty[/]")
+        return 0
+    table = Table(title=f"pending frontier tasks ({cfg.frontier_queue_dir})")
+    table.add_column("goal"); table.add_column("module"); table.add_column("task file")
+    for t in pending:
+        table.add_row(t.goal_name, t.module_stem, str(t.md_path))
+    console.print(table)
+    console.print(f"\n{len(pending)} pending. In an interactive Claude Code session run "
+                  f"`/leanloop-frontier`, or work them by hand:\n"
+                  f"  leanloop frontier --next        # print the next task prompt\n"
+                  f"  # write the proof to the task's .candidate.lean, then:\n"
+                  f"  leanloop submit <goal>")
+    return 0
+
+
+def cmd_submit(args) -> int:
+    """Verify an interactively-produced candidate through the gates; apply if it passes."""
+    from . import frontier_queue
+    cfg = _load(args)
+    task = frontier_queue.get_task(cfg.frontier_queue_dir, args.goal)
+    if task is None:
+        console.print(f"[red]no queued task named '{args.goal}'[/] "
+                      f"(see `leanloop frontier`)")
+        return 2
+    cand_path = Path(args.candidate) if args.candidate else task.candidate_path
+    if not cand_path.exists():
+        console.print(f"[red]candidate file not found: {cand_path}[/]\n"
+                      f"write your proof there first (see `leanloop frontier --next`).")
+        return 2
+    candidate = cand_path.read_text()
+    goal = frontier_queue.task_goal(task)
+    orch = Orchestrator(cfg, config_path=_config_path(args) or "")
+    try:
+        att = orch.submit(goal, candidate, module_stem=task.module_stem)
+        if att.accepted:
+            target = Path(task.project_root) / Path(*task.module_stem.split(".")).with_suffix(".lean")
+            target.write_text(candidate)
+            frontier_queue.mark_solved(task)
+            console.print(f"[green]✓ accepted[/] — applied to {target} and marked solved.\n"
+                          f"  axioms: {att.axioms.splitlines()[0] if att.axioms else '(n/a)'}\n"
+                          f"  review + commit the diff (the PR is the human checkpoint).")
+            return 0
+        console.print(f"[red]✗ rejected by the gate:[/]\n{att.lean_errors[:1500]}\n\n"
+                      f"revise {cand_path} and `leanloop submit {args.goal}` again.")
+        return 1
+    finally:
+        orch.close()
+
+
 # --------------------------------------------------------------------------- #
 def main(argv: list[str] | None = None) -> int:
     # `-c` is accepted both before and after the subcommand (a common footgun
     # with argparse subparsers) via a shared parent parser.
+    # NB: -c is added to BOTH the top parser and each subparser so it works on
+    # either side of the subcommand. default=SUPPRESS is ESSENTIAL: without it,
+    # the subparser's `-c` default (None) would clobber a `-c` given BEFORE the
+    # subcommand. With SUPPRESS, an absent -c simply doesn't set the attribute.
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("-c", "--config", default=None, help="path to leanloop.toml")
+    common.add_argument("-c", "--config", default=argparse.SUPPRESS,
+                        help="path to leanloop.toml")
 
     p = argparse.ArgumentParser(prog="leanloop", description=__doc__,
                                 parents=[common],
@@ -152,6 +231,15 @@ def main(argv: list[str] | None = None) -> int:
     sr.add_argument("--apply", action="store_true")
     sr.add_argument("--manifest", default=None, help="ordered goal manifest (TOML)")
     sub.add_parser("stats", parents=[common], help="run-log summary")
+    sf = sub.add_parser("frontier", parents=[common],
+                        help="list the interactive-frontier queue (backend=queue)")
+    sf.add_argument("--next", action="store_true",
+                    help="print the next pending task's prompt (for a Claude Code session)")
+    ss = sub.add_parser("submit", parents=[common],
+                        help="verify+apply an interactively-produced candidate proof")
+    ss.add_argument("goal", help="queued goal name (see `leanloop frontier`)")
+    ss.add_argument("--candidate", default=None,
+                    help="path to the candidate .lean (default: the task's .candidate.lean)")
 
     args = p.parse_args(argv)
     return {
@@ -160,6 +248,8 @@ def main(argv: list[str] | None = None) -> int:
         "prove": cmd_prove,
         "run": cmd_run,
         "stats": cmd_stats,
+        "frontier": cmd_frontier,
+        "submit": cmd_submit,
     }[args.cmd](args)
 
 

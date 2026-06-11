@@ -84,12 +84,20 @@ class FrontierProverConfig:
     auxiliary-lemma generation, and error-class-routed repair. Reached via the
     `claude` CLI (subscription) by default so no separate API bill is needed.
 
-    NOTE (cost): interactive `claude` draws on the subscription flat-rate;
-    headless `claude -p` moves to the metered credit pool (Anthropic, 2026-06-15).
-    Keep this tier SPARSE (the transcript's ~5-10% of calls).
+    THREE cost modes via `backend`:
+      - "queue"      : enqueue hard goals for an INTERACTIVE Claude Code session
+                       to clear (subscription FLAT-RATE — cheapest). The session
+                       writes proofs; `leanloop submit` re-verifies them through
+                       the same gates. Not unattended, but free. (Recommended if
+                       you have a Claude subscription.)
+      - "claude_cli" : headless `claude -p` (METERED credit pool post 2026-06-15;
+                       flat-rate before then). Unattended but costs credits.
+      - "openai"     : an OpenAI-compatible frontier endpoint (pay per token).
+      - "none"       : disable the frontier tier entirely (local-only).
+    Keep any metered tier SPARSE (the transcript's ~5-10% of calls).
     """
     enabled: bool = True
-    backend: str = "claude_cli"              # "claude_cli" | "openai" | "none"
+    backend: str = "claude_cli"              # "queue" | "claude_cli" | "openai" | "none"
     command: str = "claude"                  # CLI binary
     model: str = ""                          # "" => CLI default
     # openai-compatible fallback (e.g. a rented frontier endpoint)
@@ -152,6 +160,8 @@ class Config:
     audit: AuditConfig = field(default_factory=AuditConfig)
     # sqlite run log (the expert-iteration corpus + triage trail).
     db_path: str = "leanloop_runs.sqlite"
+    # where the `queue` frontier backend drops tasks for an interactive session.
+    frontier_queue_dir: str = "leanloop_frontier_queue"
 
     # ------------------------------------------------------------------ #
     @staticmethod

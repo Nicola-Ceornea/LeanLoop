@@ -32,7 +32,8 @@ def candidates(file_text: str, tactics: list[str] | None = None) -> list[tuple[s
 
     Handles both `:= by sorry` and a trailing `sorry` as the proof body.
     """
-    tacs = tactics or DEFAULT_OPENERS
+    # None => use the default cascade; [] => caller explicitly disabled Tier 0.
+    tacs = DEFAULT_OPENERS if tactics is None else tactics
     out: list[tuple[str, str]] = []
     for tac in tacs:
         if _SORRY_PROOF_RE.search(file_text):

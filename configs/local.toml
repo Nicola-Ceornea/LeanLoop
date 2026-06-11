@@ -19,8 +19,10 @@ self_correct_rounds = 2
 
 [prover.frontier]
 enabled = true
-backend = "claude_cli"                   # uses your `claude` login; keep sparse
-# backend = "none"                       # fully offline / local-only run
+backend = "queue"        # FREE: queue hard goals for an interactive Claude Code
+                         #   session (`/leanloop-frontier`). Subscription flat-rate.
+# backend = "claude_cli" # unattended but METERED (headless credit pool)
+# backend = "none"       # fully offline / local-only run
 
 [audit]
 # Reviewed hardware/external axioms your project legitimately uses, e.g.:
