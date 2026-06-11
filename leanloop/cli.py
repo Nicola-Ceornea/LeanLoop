@@ -10,6 +10,7 @@
     leanloop status       [-c cfg] [--watch]  live status + liveness of the current run
     leanloop bench        [-c cfg] [--samples N] [--goals M]
                                               measure prover tok/s + local close-rate
+    leanloop vet MODULE   [-c cfg] [--explain] spec-assurance probes + English review
     leanloop frontier     [-c cfg] [--next]   list (or print) interactive-frontier tasks
     leanloop submit GOAL  [-c cfg] [--candidate F]
                                               verify+apply an interactively-written proof
@@ -409,6 +410,73 @@ def cmd_bench(args) -> int:
     return 0
 
 
+def cmd_vet(args) -> int:
+    """Spec-assurance probes: mechanical signals about whether a spec says
+    anything (counterexample search, hypothesis satisfiability, negation
+    proving) + an LLM explain handoff for the plain-English review."""
+    from . import spec_vet
+    from .lean_runner import LeanRunner, theorem_signatures
+
+    cfg = _load(args)
+    root = Path(cfg.project.root).resolve()
+    path = root / Path(*args.module.split(".")).with_suffix(".lean")
+    if not path.exists():
+        console.print(f"[red]no such module file: {path}[/]")
+        return 2
+    goal_text = path.read_text()
+    sigs = theorem_signatures(goal_text)
+    if not sigs:
+        console.print("[yellow]no theorem/lemma declarations found — nothing to vet[/]")
+        return 1
+
+    runner = LeanRunner(cfg.project)
+    console.rule(f"spec vet — {args.module} ({len(sigs)} theorem(s))")
+    probes = spec_vet.build_probes(goal_text, sigs)
+    verdicts = []
+    worst = "green"
+    rank = {"green": 0, "skip": 1, "yellow": 2, "red": 3}
+    for p in probes:
+        console.print(f"[dim]probe {p.kind}:{p.theorem_fqn}…[/]")
+        out = runner.run_scratch_file(p.file_text, tag=f"Vet{p.kind.title()}")
+        v = spec_vet.judge(p, out)
+        verdicts.append(v)
+        color = {"red": "red", "yellow": "yellow", "green": "green", "skip": "dim"}[v.level]
+        console.print(f"  [{color}]{v.level.upper():6}[/] [{v.kind}] {v.message}")
+        if v.detail and v.level in ("red", "yellow"):
+            console.print(f"  [dim]{v.detail[:300]}[/]")
+        if rank[v.level] > rank[worst]:
+            worst = v.level
+
+    console.print(f"\n[bold]overall: {worst.upper()}[/]"
+                  + ("  — investigate before trusting this spec" if worst != "green" else
+                     "  — mechanical probes raise no flags"))
+
+    if args.explain:
+        probes_summary = "\n".join(
+            f"- {v.theorem_fqn} [{v.kind}]: {v.level.upper()} — {v.message}" for v in verdicts)
+        prompt = spec_vet.EXPLAIN_PROMPT.format(probes=probes_summary, goal=goal_text)
+        fb = cfg.prover.frontier
+        if fb.enabled and fb.backend == "claude_cli":
+            import subprocess as sp
+            console.rule("LLM spec review (claude CLI — metered)")
+            res = sp.run([fb.command, "-p", prompt], capture_output=True, text=True,
+                         timeout=600)
+            console.print(res.stdout or res.stderr)
+        else:
+            out_path = Path(cfg.frontier_queue_dir)
+            out_path.mkdir(parents=True, exist_ok=True)
+            f = out_path / f"{args.module.replace('.', '_')}.explain.md"
+            header = (f"# Spec review request — `{args.module}`\n\n"
+                      "Paste the following into an interactive Claude Code session "
+                      "(subscription flat-rate) for the plain-English adversarial "
+                      "spec review:\n\n---\n\n")
+            f.write_text(header + prompt + "\n")
+            console.print(f"\n[magenta]explain prompt written to {f}[/] — open it in "
+                          f"an interactive Claude Code session (flat-rate) for the "
+                          f"plain-English adversarial review.")
+    return 0 if worst in ("green", "skip") else 1
+
+
 def cmd_frontier(args) -> int:
     """List the interactive-frontier queue, or print the next task's prompt."""
     from . import frontier_queue
@@ -510,6 +578,11 @@ def main(argv: list[str] | None = None) -> int:
     sb.add_argument("--samples", type=int, default=5, help="throughput probe samples")
     sb.add_argument("--goals", type=int, default=0,
                     help="also measure local close-rate over N project goals")
+    sv = sub.add_parser("vet", parents=[common],
+                        help="spec-assurance probes (counterexample/vacuity/negation) + LLM explain")
+    sv.add_argument("module", help="dotted module whose theorems to vet")
+    sv.add_argument("--explain", action="store_true",
+                    help="also produce the plain-English adversarial spec review")
     sf = sub.add_parser("frontier", parents=[common],
                         help="list the interactive-frontier queue (backend=queue)")
     sf.add_argument("--next", action="store_true",
@@ -530,6 +603,7 @@ def main(argv: list[str] | None = None) -> int:
         "doctor": cmd_doctor,
         "status": cmd_status,
         "bench": cmd_bench,
+        "vet": cmd_vet,
         "frontier": cmd_frontier,
         "submit": cmd_submit,
     }[args.cmd](args)

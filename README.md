@@ -56,13 +56,15 @@ no-`sorry`/`admit`, no candidate-declared `axiom`s, no `native_decide`, and a
 **fail-closed** `#print axioms` closure check; goal scan + ordered manifests;
 the sqlite run log; single-machine and remote-Ollama deployment; and a
 **free interactive-frontier mode** (queue hard goals for a flat-rate Claude Code
-session via `/leanloop-frontier` + `leanloop submit`). The soundness
-gate is validated end-to-end against a real Lean toolchain
+session via `/leanloop-frontier` + `leanloop submit`); and **spec assurance**
+(`leanloop vet`: counterexample search, vacuity detection, negation probing +
+an LLM plain-English review handoff — see "Spec assurance" below). The
+soundness gate is validated end-to-end against a real Lean toolchain
 (`tests/test_soundness.py`).
 
 **Roadmap (not yet implemented — named honestly):** Kimina-Lean-Server backend,
 per-theorem goal splitting + lemma-library harvesting, error-class-routed
-repair prompts, prover ensembling, negation probing / Rust mutation testing for
+repair prompts, prover ensembling, Rust mutation / differential testing for
 spec assurance, QLoRA expert iteration. Listed again at the bottom.
 
 ---
@@ -268,6 +270,47 @@ a Claude Code session you start, clear the queue); `claude_cli` is unattended
 but metered. You can also disable the frontier entirely with `backend = "none"`
 or `LEANLOOP_FRONTIER_DISABLE=1`.
 
+## Spec assurance: `leanloop vet` (trusting specs without reading Lean)
+
+The kernel proves "the code matches the spec" — it cannot tell you the **spec
+says what you meant**. That's the one human checkpoint, and you don't need Lean
+expertise to do it: `vet` gives mechanical, kernel/test-backed signals, and
+`--explain` turns the spec into a plain-English adversarial review.
+
+```bash
+leanloop vet Extracted.Bits             # mechanical probes
+leanloop vet Extracted.Bits --explain   # + plain-English spec review prompt
+```
+
+Three probes per theorem (each a real Lean run inside your project, never an
+LLM opinion):
+
+| probe | question | signal |
+|-------|----------|--------|
+| **CEX** | is the statement *false*? (`plausible` random-tests it) | 🔴 RED + a **concrete counterexample** if so |
+| **HYP** | are the hypotheses *satisfiable*? (witness search) | 🟢 witness found → not vacuous · 🟡 none → may be **vacuously true** |
+| **NEG** | does the conclusion's *negation* prove with cheap tactics? | 🔴 RED if so (kernel-checked falsity) |
+
+A spec that's *false* or *vacuous* is caught before any prover budget is spent
+— and before you trust a green proof of it. (Validated live: a planted
+off-by-one spec → RED with witness; a planted contradictory-hypothesis spec →
+YELLOW.) Probes need the `Plausible` package (ships with Mathlib-based
+projects); without it they degrade to SKIP, never to false confidence.
+
+`--explain` then writes a self-contained review prompt (statement-by-statement:
+*what does this guarantee in plain English, what does it NOT say, could a wrong
+implementation still pass it?*) — drop it into an interactive Claude Code
+session (flat-rate), or it runs directly via `claude_cli` if that's your
+frontier backend. The mechanical verdicts are embedded in the prompt so the
+LLM review is anchored to ground truth.
+
+**Division of labor:** the LLM *drafts and critiques* specs (it's good at
+translating Lean ↔ English and spotting gaps); the *trust* comes from the
+mechanical probes + the kernel. LLM opinion is never the acceptance signal.
+Heavier spec-assurance (Rust mutation testing — inject a bug, confirm the proof
+breaks; differential testing of the Lean model vs. the real Rust) is on the
+roadmap and slots into the same command.
+
 ## Trust chain (what a green run does and doesn't mean)
 
 A proof here is a machine-checked theorem **about the Aeneas model of your
@@ -284,5 +327,6 @@ information-flow are out of scope entirely.
   lemma library (`@[grind]`/`@[progress]`)
 * error-class-routed repair prompts (AutoVerus-style taxonomy from the run log)
 * prover ensembling (DeepSeek-Prover-V2-7B, Kimina-RL-1.7B fast tier)
-* negation probing + Rust mutation testing for spec assurance
+* Rust mutation testing + differential testing for spec assurance
+  (statement-level negation probing + counterexample search: **done** — `leanloop vet`)
 * QLoRA expert iteration on the logged (goal, proof) corpus

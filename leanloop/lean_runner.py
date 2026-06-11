@@ -98,6 +98,29 @@ class LeanRunner:
         return res
 
 
+    # ------------------------------------------------------------------ #
+    def run_scratch_file(self, file_text: str, *, tag: str = "Vet",
+                         timeout: int = 600) -> str:
+        """Elaborate a throwaway Lean file inside the project (sees its deps via
+        `lake env lean`) and return the full compiler output. Used by the
+        spec-vet probes — diagnostics only, never an acceptance path."""
+        path = self.root / f"LeanLoop{tag}_{abs(hash(file_text)) % 10_000_000}.lean"
+        try:
+            path.write_text(file_text)
+            res = subprocess.run(
+                [self.p.lake, "env", "lean", str(path)],
+                cwd=self.root, capture_output=True, text=True, timeout=timeout,
+            )
+            return (res.stdout + "\n" + res.stderr).strip()
+        except subprocess.TimeoutExpired:
+            return "error: scratch elaboration timed out"
+        except Exception as e:
+            return f"error: scratch runner: {e}"
+        finally:
+            if path.exists():
+                path.unlink()
+
+
 # --------------------------------------------------------------------------- #
 # Static extraction (used to PIN the goal's theorems — see loop._verify)
 # --------------------------------------------------------------------------- #
