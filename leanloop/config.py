@@ -118,6 +118,11 @@ class FrontierProverConfig:
 class ProverStackConfig:
     local: LocalProverConfig = field(default_factory=LocalProverConfig)
     frontier: FrontierProverConfig = field(default_factory=FrontierProverConfig)
+    # hard wall-clock budget per GOAL across tiers 0+1 (seconds; 0 = unlimited).
+    # Without it one pathological goal (slow lake builds x 11 tactics x pass@N)
+    # can silently consume an entire overnight run while `status` reads ALIVE.
+    # On expiry the goal is handed to the frontier tier (queued if backend=queue).
+    goal_timeout_s: float = 3600.0
     # tier-0 non-LLM tactic battery cascade (run before any model call).
     # Founding-doc cascade (cheap/decisive first). Each becomes `:= by <tac>`.
     # `step*`/`progress` are Aeneas-idiomatic openers for monadic goals.

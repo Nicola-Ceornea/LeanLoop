@@ -46,6 +46,7 @@ class Orchestrator:
                          if fb.enabled and fb.backend in ("claude_cli", "openai") else None)
         self._goal_sigs: dict[str, str] = {}   # pinned per goal in prove()
         self._goal_hash: str = ""              # content hash, keys the solved cache
+        self._goal_deadline: float | None = None   # per-goal wall-clock budget
         self._last_feedback: str = ""          # best local failure, for queued tasks
 
     # ------------------------------------------------------------------ #
@@ -54,9 +55,14 @@ class Orchestrator:
         self._goal_hash = goal_hash
         if self.db.is_solved(goal.name, goal_hash):
             console.print(f"[dim]{goal.name}: already solved (cached)[/]")
-            return GoalOutcome(goal.name, True, "cached")
+            # return the stored proof so --apply can still write it: a proof
+            # accepted in a NON-apply run (e.g. bench) must not strand the goal
+            # as "closed in the DB but sorry on disk".
+            return GoalOutcome(goal.name, True, "cached", self.db.solved_proof(goal.name))
 
         console.rule(f"[bold]{goal.name}")
+        budget = self.cfg.prover.goal_timeout_s
+        self._goal_deadline = (time.monotonic() + budget) if budget > 0 else None
 
         # PIN the goal's theorems up front: a candidate is only accepted if it
         # proves EXACTLY these names with these (normalized) signatures. Without
@@ -69,6 +75,9 @@ class Orchestrator:
 
         # --- Tier 0: tactic battery (free) ---
         for tac, cand in tactic_battery.candidates(goal.file_text, self.cfg.prover.tactic_battery):
+            if self._past_deadline():
+                console.print("[yellow]⏱ goal budget exhausted in tactic battery[/]")
+                break
             att = self._verify(goal, cand, tier="tactic", module_stem=module_stem,
                                model=f"tactic:{tac}")
             if att.accepted:
@@ -76,7 +85,7 @@ class Orchestrator:
                 return GoalOutcome(goal.name, True, "tactic", cand)
 
         # --- Tier 1: local prover pass@N with self-correction ---
-        if self.local:
+        if self.local and not self._past_deadline():
             if self._ensure_prover():
                 outcome = self._prover_rounds(goal, self.local, "local", module_stem)
                 if outcome.accepted:
@@ -104,6 +113,13 @@ class Orchestrator:
 
         console.print(f"[yellow]✗ {goal.name}: open after all tiers (flag for review)[/]")
         return GoalOutcome(goal.name, False)
+
+    # ------------------------------------------------------------------ #
+    def _past_deadline(self) -> bool:
+        """Per-goal wall-clock budget (config prover.goal_timeout_s). On expiry
+        the remaining tiers 0/1 are skipped and the goal falls through to the
+        frontier tier — so one pathological goal can't eat the whole run."""
+        return self._goal_deadline is not None and time.monotonic() > self._goal_deadline
 
     # ------------------------------------------------------------------ #
     def _ensure_prover(self) -> bool:
@@ -142,6 +158,9 @@ class Orchestrator:
             candidates = prover.propose(goal, feedback=feedback)
             best_errors = ""
             for cand in candidates:
+                if self._past_deadline():
+                    console.print(f"[yellow]⏱ goal budget exhausted during {tier} round {rnd}[/]")
+                    return GoalOutcome(goal.name, False)
                 att = self._verify(goal, cand, tier=tier, module_stem=module_stem,
                                    model=getattr(prover.cfg, "model", tier),
                                    sampling={"round": rnd})

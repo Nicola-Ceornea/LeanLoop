@@ -96,3 +96,64 @@ def test_solved_cache_legacy_rows_still_hit_without_hash(tmp_path):
     assert db.is_solved("Mod.Old", "")
     assert not db.is_solved("Mod.Old", "newhash")    # but never a hashed query
     db.close()
+
+
+def test_cache_hit_returns_stored_proof_for_apply(tmp_path):
+    """Bug found 2026-06-11 gap-analysis: a proof accepted WITHOUT --apply
+    (e.g. bench) stranded the goal — later cache hits returned EMPTY proof_text
+    so `run --apply` never wrote the file. Cache hits must carry the proof."""
+    import hashlib
+    from leanloop.config import Config
+    from leanloop.loop import Orchestrator
+    from leanloop.provers.base import Goal
+
+    goal_text = "theorem t : True := by sorry\n"
+    proof_text = "theorem t : True := trivial\n"
+    ghash = hashlib.sha256(goal_text.encode()).hexdigest()[:16]
+
+    cfg = Config()
+    cfg.db_path = str(tmp_path / "r.sqlite")
+    cfg.project.root = str(tmp_path)
+    cfg.prover.local.enabled = False
+    cfg.prover.frontier.enabled = False
+
+    # simulate the earlier non-apply acceptance
+    pre = RunDB(cfg.db_path)
+    a = _att("Mod.T", "local", accepted=True)
+    a.proof_text = proof_text
+    pre.log(a, goal_hash=ghash)
+    pre.close()
+
+    orch = Orchestrator(cfg)
+    try:
+        out = orch.prove(Goal(name="Mod.T", file_text=goal_text, target_module="Mod.T"),
+                         module_stem="Mod.T")
+    finally:
+        orch.close()
+    assert out.accepted and out.tier == "cached"
+    assert out.proof_text == proof_text          # --apply can now write it
+
+
+def test_goal_deadline_skips_tiers(tmp_path):
+    """Bug 2: per-goal wall-clock budget. With an already-expired deadline the
+    tactic battery and local tier must be skipped (no lake invocations)."""
+    from leanloop.config import Config
+    from leanloop.loop import Orchestrator
+    from leanloop.provers.base import Goal
+
+    cfg = Config()
+    cfg.db_path = str(tmp_path / "r.sqlite")
+    cfg.project.root = str(tmp_path)
+    cfg.prover.goal_timeout_s = 0.000001        # expires immediately
+    cfg.prover.local.enabled = False
+    cfg.prover.frontier.enabled = True
+    cfg.prover.frontier.backend = "queue"       # expired goal still gets queued
+    cfg.frontier_queue_dir = str(tmp_path / "q")
+
+    orch = Orchestrator(cfg)
+    try:
+        out = orch.prove(Goal(name="Mod.T", file_text="theorem t : True := by sorry\n",
+                              target_module="Mod.T"), module_stem="Mod.T")
+    finally:
+        orch.close()
+    assert not out.accepted and out.tier == "queued"   # handed to the frontier

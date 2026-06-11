@@ -158,6 +158,12 @@ class RunDB:
         keys = ["ts", "goal_name", "tier", "accepted", "build_ok", "wall_clock_s", "lean_errors"]
         return [dict(zip(keys, r)) for r in cur.fetchall()]
 
+    def solved_proof(self, goal_name: str) -> str:
+        """The accepted proof text for a solved goal (empty if none stored)."""
+        row = self.conn.execute(
+            "SELECT proof_text FROM solved WHERE goal_name=?", (goal_name,)).fetchone()
+        return row[0] if row and row[0] else ""
+
     def solved_names(self) -> set[str]:
         return {r[0] for r in self.conn.execute("SELECT goal_name FROM solved")}
 

@@ -86,9 +86,14 @@ stopped. `status` will show the prior run as STALLED/DEAD until you relaunch.
 
 **`status` says STALLED but the prover is fine.**
 Usually a single `lake build` is grinding a hard goal (cold Mathlib builds can
-take a while) — check `leanloop.out`/the tmux pane. If a goal is genuinely
-wedged, kill the run, and either bump that module in a manifest to deprioritize
-it or mark it for human review; relaunch to continue with the rest.
+take a while) — check `leanloop.out`/the tmux pane and the "working on it Xm"
+age in `status`.
+
+**One goal is eating the night.** Every goal has a hard wall-clock budget,
+`[prover] goal_timeout_s` (default 3600 s): on expiry the remaining tiers are
+skipped and the goal falls through to the frontier (queued if
+`backend = "queue"`), so the run moves on. Lower it for broad first passes;
+set `0` for unlimited.
 
 **Goals piling up in the frontier queue (`backend = "queue"`).**
 That's expected — they're waiting for you. Clear them in an interactive Claude

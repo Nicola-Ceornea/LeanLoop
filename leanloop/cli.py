@@ -126,7 +126,8 @@ def cmd_run(args) -> int:
             outcome = orch.prove(dg.goal, module_stem=dg.module_stem)
             if outcome.accepted:
                 closed += 1
-                if args.apply and outcome.proof_text:
+                if args.apply and outcome.proof_text and \
+                        dg.path.read_text() != outcome.proof_text:
                     dg.path.write_text(outcome.proof_text)
                     console.print(f"[green]applied -> {dg.path}[/]")
         orch.db.run_end(closed, _queue_pending(cfg))
@@ -294,8 +295,11 @@ def cmd_status(args) -> int:
                          else "[green]ALIVE[/]" if age < 180
                          else "[red]STALLED/DEAD[/]")
                 console.print(f"state: {state}   host: {st['host']}  pid: {st['pid']}")
+                cur = st['current_goal'] or '—'
+                since = f" (working on it {_ago(st['last_beat_ts']).replace(' ago','')})" \
+                        if (cur != '—' and not st['finished']) else ""
                 console.print(f"progress: [bold]{st['done']}/{st['total']}[/] closed, "
-                              f"{st['queued']} queued   current: {st['current_goal'] or '—'}")
+                              f"{st['queued']} queued   current: {cur}{since}")
                 console.print(f"started {_ago(st['started_ts'])}, last activity {_ago(last)}")
             console.print(db.stats())
             console.print("\n[dim]recent attempts:[/]")
@@ -376,6 +380,10 @@ def cmd_bench(args) -> int:
         else:
             console.rule(f"close-rate (local tier only, {len(found)} goals)")
             cfg.prover.frontier.enabled = False   # measure the LOCAL stack's yield
+            import tempfile
+            cfg.db_path = str(Path(tempfile.mkdtemp(prefix="leanloop-bench-")) / "bench.sqlite")
+            console.print(f"[dim]bench uses an ephemeral DB ({cfg.db_path}) — "
+                          f"probe results never pollute the production solved-cache[/]")
             orch = Orchestrator(cfg, config_path=_config_path(args) or "")
             rows = []
             try:
