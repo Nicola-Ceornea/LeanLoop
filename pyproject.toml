@@ -1,0 +1,27 @@
+[project]
+name = "leanloop"
+version = "0.1.0"
+description = "Adversarial LLM-driven formal-verification loop for Rust -> Charon -> Aeneas -> Lean 4. Tiered prover stack (tactic battery -> local Goedel -> frontier), Lean kernel as ground truth."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "httpx>=0.27",      # async HTTP for Ollama / OpenAI-compatible endpoints
+    "tomli>=2.0; python_version < '3.11'",
+    "rich>=13.0",       # readable console output
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.5"]
+
+[project.scripts]
+leanloop = "leanloop.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["leanloop*"]
+
+[tool.ruff]
+line-length = 100

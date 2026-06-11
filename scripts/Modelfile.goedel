@@ -1,0 +1,23 @@
+# Ollama Modelfile for Goedel-Prover-V2-8B (GGUF).
+# The model is Qwen3-8B-based; its card specifies a single user message with
+# add_generation_prompt=True — i.e. the Qwen chat template below. LeanLoop's
+# /api/generate calls land in {{ .Prompt }}.
+#
+# FROM is filled in by setup_prover_host.sh with the downloaded GGUF path.
+FROM {GGUF_PATH}
+
+TEMPLATE """<|im_start|>user
+{{ .Prompt }}<|im_end|>
+<|im_start|>assistant
+"""
+
+PARAMETER stop "<|im_end|>"
+# Formal output is unforgiving; the founding doc recommends gentle sampling
+# defaults (LeanLoop overrides temperature/top_p per request anyway).
+PARAMETER temperature 0.7
+PARAMETER top_p 0.95
+# Total context, SHARED across OLLAMA_NUM_PARALLEL slots. With 2 parallel slots
+# on a 16GB card (Goedel-8B Q8_0 ~8.7GB), 24576 gives ~12k tokens/slot and the
+# KV cache (~6GB) still fits. LeanLoop overrides num_ctx per request to match
+# its `concurrency`; raise both together only with more VRAM.
+PARAMETER num_ctx 24576

@@ -1,0 +1,28 @@
+# ============================================================================
+# LeanLoop — SINGLE-MACHINE config: everything (loop, Lean, Ollama) on one box.
+# Copy to your working dir as `leanloop.toml` and edit `project.root`.
+# ============================================================================
+
+[project]
+root = "/path/to/your/aeneas-lean-project"   # contains lakefile + lean-toolchain
+lake = "lake"
+
+[prover.local]
+enabled  = true
+backend  = "ollama"
+base_url = "http://localhost:11434"     # Ollama on THIS machine
+model    = "goedel-prover-v2-8b"        # created by scripts/setup_prover_host.sh
+samples  = 32                            # pass@N budget per goal
+temperatures = [0.7, 1.0, 1.2]
+concurrency  = 2   # shared ctx across Ollama slots; see docs/deployment.md
+self_correct_rounds = 2
+
+[prover.frontier]
+enabled = true
+backend = "claude_cli"                   # uses your `claude` login; keep sparse
+# backend = "none"                       # fully offline / local-only run
+
+[audit]
+# Reviewed hardware/external axioms your project legitimately uses, e.g.:
+# axiom_whitelist = ["keccak256_pure"]
+axiom_whitelist = []

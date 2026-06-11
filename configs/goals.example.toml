@@ -1,0 +1,12 @@
+# Ordered goal manifest for `leanloop run --manifest configs/goals.example.toml`.
+# List LEAF modules first (bottom-up the call graph): once a leaf's lemmas are
+# proven and committed, they become premises available to callers above them.
+
+[[goal]]
+module  = "Extracted.Bits"
+name    = "bit-arithmetic foundation"
+context = "Disjoint-OR equals ADD; if library search fails, prove via Nat.eq_of_testBit_eq + Nat.testBit_lor/testBit_shiftLeft."
+
+[[goal]]
+module  = "Extracted.ForsSpec"
+context = "Uses the Bits lemmas above. Aeneas monadic goal — try `progress` / `step*` then `scalar_tac` before whole-proof sampling."

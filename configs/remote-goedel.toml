@@ -1,0 +1,27 @@
+# ============================================================================
+# LeanLoop — REMOTE-PROVER config: the loop + Lean run here; Goedel runs on a
+# second machine (e.g. the RX 6950 XT box) serving Ollama over the LAN.
+# The ONLY difference from local.toml is `base_url`.
+# ============================================================================
+
+[project]
+root = "/path/to/your/aeneas-lean-project"
+lake = "lake"
+
+[prover.local]
+enabled  = true
+backend  = "ollama"
+base_url = "http://192.168.1.50:11434"  # <-- your GPU box's LAN IP
+model    = "goedel-prover-v2-8b"
+samples  = 32
+temperatures = [0.7, 1.0, 1.2]
+concurrency  = 2   # shared ctx across Ollama slots; see docs/deployment.md                         # match the GPU box's parallel slots
+self_correct_rounds = 2
+timeout_s = 1200                         # generous: big proofs + LAN
+
+[prover.frontier]
+enabled = true
+backend = "claude_cli"
+
+[audit]
+axiom_whitelist = []
