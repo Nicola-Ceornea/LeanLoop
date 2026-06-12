@@ -1,0 +1,47 @@
+# ============================================================================
+# LeanLoop — 32B QUALITY-TIER config: Goedel-Prover-V2-32B served by Ollama on
+# the SAME box (or set base_url for a remote one). The 32B is markedly stronger
+# than the 8B but needs ~26 GB (Q4_K_M + KV), so it WON'T fit a 16 GB dGPU — it
+# runs on an iGPU/APU with enough shared memory (e.g. Ryzen AI 9 HX 370 +
+# Radeon 890M, Strix Point) or any ≥24 GB GPU.
+#
+#   Setup:  GOEDEL_SIZE=32b bash scripts/setup_prover_host.sh
+#   then:   cp configs/local-32b.toml leanloop.toml  &&  edit project.root
+#
+# Measured on Strix Point (890M iGPU, Vulkan, dual-channel DDR5): ~3.4 tok/s,
+# 100% GPU, 26 GB in GTT — no BIOS change needed. It's bandwidth-bound, so it's
+# the CAPACITY/quality tier for HARD goals; keep the 8B (configs/local.toml) on
+# a faster dGPU as the cheap first-pass tier and let the cascade escalate.
+# ============================================================================
+
+[project]
+root = "/path/to/your/aeneas-lean-project"   # contains lakefile + lean-toolchain
+lake = "lake"
+
+[prover.local]
+enabled  = true
+backend  = "ollama"
+base_url = "http://localhost:11434"      # or http://<igpu-box-ip>:11434 for remote
+model    = "goedel-prover-v2-32b"        # created by GOEDEL_SIZE=32b setup_prover_host.sh
+# Fewer samples than the 8B's 32: the 32B's higher pass@1 needs less breadth,
+# and at ~3.4 tok/s each sample is slow — spend the budget on quality, not N.
+samples  = 8
+temperatures = [0.7, 1.0]
+# One stream: the iGPU is memory-bandwidth-bound, so two parallel slots just
+# halve each other's tok/s (and double the KV cache). concurrency=1 gives the
+# full ~3.4 tok/s and lower per-sample latency. Raise only on a card with
+# spare bandwidth + memory.
+concurrency  = 1
+self_correct_rounds = 2
+# Generous: a 32B proof attempt at ~3.4 tok/s can run a couple of minutes.
+timeout_s = 1800
+
+[prover.frontier]
+enabled = true
+backend = "queue"        # FREE: queue hard goals for an interactive Claude Code
+                         #   session (`/leanloop-frontier`). Subscription flat-rate.
+# backend = "claude_cli" # unattended but METERED (headless credit pool)
+# backend = "none"       # fully offline / local-only run
+
+[audit]
+axiom_whitelist = []

@@ -21,14 +21,23 @@
 # ============================================================================
 set -euo pipefail
 
-QUANT="${GOEDEL_QUANT:-Q8_0}"
+# GOEDEL_SIZE selects the prover: 8b (default; fits a 16 GB dGPU like the
+# 6950 XT) or 32b (stronger; ~26 GB incl. KV — too big for a 16 GB card, but
+# runs on an iGPU/APU with enough shared memory, e.g. Strix Point + GTT; see
+# the "32B on an iGPU box" README section).
+SIZE="${GOEDEL_SIZE:-8b}"
+case "$SIZE" in
+  8b)  REPO="Goedel-Prover-V2-8B-GGUF";  BASE="Goedel-Prover-V2-8B";  DEFAULT_QUANT="Q8_0";   MODEL_NAME="goedel-prover-v2-8b"  ;;
+  32b) REPO="Goedel-Prover-V2-32B-GGUF"; BASE="Goedel-Prover-V2-32B"; DEFAULT_QUANT="Q4_K_M"; MODEL_NAME="goedel-prover-v2-32b" ;;
+  *)   echo "GOEDEL_SIZE must be '8b' or '32b' (got '$SIZE')"; exit 1 ;;
+esac
+QUANT="${GOEDEL_QUANT:-$DEFAULT_QUANT}"
 GGUF_DIR="${GGUF_DIR:-$HOME/models}"
-MODEL_NAME="goedel-prover-v2-8b"
-GGUF_FILE="Goedel-Prover-V2-8B.${QUANT}.gguf"
-# Verified to exist (mradermacher repo, June 2026): Goedel-Prover-V2-8B.Q8_0.gguf
-# and .Q6_K.gguf. If HF layout changes, download any Goedel-V2-8B GGUF manually
-# into $GGUF_DIR with this exact filename, or `ollama pull hf.co/<repo>:<quant>`.
-GGUF_URL="https://huggingface.co/mradermacher/Goedel-Prover-V2-8B-GGUF/resolve/main/${GGUF_FILE}"
+GGUF_FILE="${BASE}.${QUANT}.gguf"
+# Verified to exist (mradermacher repos, June 2026): 8B {Q8_0, Q6_K}; 32B
+# {Q4_K_M, Q6_K, Q8_0}. If HF layout changes, download any matching GGUF into
+# $GGUF_DIR with this exact filename, or `ollama pull hf.co/<repo>:<quant>`.
+GGUF_URL="https://huggingface.co/mradermacher/${REPO}/resolve/main/${GGUF_FILE}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # --- 1. Ollama --------------------------------------------------------------
@@ -42,7 +51,7 @@ fi
 # --- 2. GGUF ----------------------------------------------------------------
 mkdir -p "$GGUF_DIR"
 if [ ! -f "$GGUF_DIR/$GGUF_FILE" ]; then
-  echo "== downloading $GGUF_FILE (~8.7 GB for Q8_0; resume-capable) =="
+  echo "== downloading $GGUF_FILE (resume-capable; 8B Q8_0 ~8.3 GB / 32B Q4_K_M ~18.4 GB) =="
   curl -fL --retry 5 -C - -o "$GGUF_DIR/$GGUF_FILE" "$GGUF_URL"
 else
   echo "== GGUF already present: $GGUF_DIR/$GGUF_FILE =="
@@ -100,5 +109,19 @@ TROUBLESHOOTING (AMD RX 6950 XT / RDNA2, gfx1030):
       sudo systemctl daemon-reload && sudo systemctl restart ollama
   * Verify GPU offload:  ollama ps   (should show 100% GPU for the model)
   * ROCm missing entirely: install AMD's rocm packages for your distro first.
+
+AMD iGPU / APU (e.g. Ryzen AI 9 HX 370 + Radeon 890M, Strix Point):
+  * No ROCm needed — Ollama 0.24+ drives the iGPU via its VULKAN backend.
+    Install the Vulkan loader + amdvlk/RADV ICD; `vulkaninfo` must list the GPU.
+  * The iGPU has no dedicated VRAM: it uses the BIOS UMA frame buffer + the
+    Linux amdgpu GTT (system RAM). GTT defaults to ~half of RAM — plenty: a
+    26 GB (32B Q4 + KV) model loads to 100% GPU with NO BIOS change. Only raise
+    the UMA size / `amdgpu.gttsize=<MB>` kernel param for a model larger than
+    the GTT cap. Capacity is rarely the limit — DDR5 BANDWIDTH is, so per-token
+    speed is fixed by RAM bandwidth (enable EXPO/the fastest stable clock).
+  * The XDNA2 NPU does NOT help here (Ollama/llama.cpp can't use it).
+  * Measured (Strix Point, dual-channel DDR5): 8B Q8_0 ~8 tok/s, 32B Q4_K_M
+    ~3.4 tok/s, both 100% GPU. The iGPU is the CAPACITY tier (runs the 32B a
+    16 GB dGPU can't); a discrete card is the SPEED tier. Use configs/local-32b.toml.
 ------------------------------------------------------------------------------
 EOF

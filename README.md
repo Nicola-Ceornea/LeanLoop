@@ -162,6 +162,48 @@ Ollama and want llama.cpp's parallel slots tuned by hand.
 
 ---
 
+## The 32B prover on an iGPU / APU box (shared-memory capacity tier)
+
+Goedel-Prover-V2 also ships a **32B** that is markedly stronger than the 8B —
+but at ~26 GB (Q4_K_M + KV) it **won't fit a 16 GB dGPU** like the 6950 XT. It
+*does* run on an **iGPU/APU with enough shared system memory**, which makes a
+laptop/mini-PC APU a genuine *capacity tier*: it hosts the bigger model your
+discrete card can't.
+
+Tested target: **AMD Ryzen AI 9 HX 370 + Radeon 890M (Strix Point), DDR5.**
+
+```bash
+# on the iGPU box:
+GOEDEL_SIZE=32b bash scripts/setup_prover_host.sh        # add --serve-lan for remote
+# on the loop box:
+cp configs/local-32b.toml leanloop.toml                  # (or set base_url for remote)
+leanloop check-prover && leanloop run --apply
+```
+
+What to expect, measured on the 890M:
+
+* **It just works on Vulkan — no ROCm.** Ollama 0.24+ drives the iGPU through
+  its Vulkan backend; `ollama ps` shows **100% GPU**. (Install the Vulkan
+  loader + ICD; `vulkaninfo` should list the GPU.)
+* **No BIOS tweak needed.** The iGPU has no dedicated VRAM — it uses the BIOS
+  UMA frame buffer (a few GB) **plus the Linux amdgpu GTT** (system RAM, default
+  ~half of RAM). A 26 GB model loaded straight into GTT at 100% GPU. Only raise
+  the UMA size or the `amdgpu.gttsize=<MB>` kernel param if you want a model
+  *larger* than the GTT cap; **capacity is rarely the limit.**
+* **Bandwidth is the limit, not memory.** Per-token speed is fixed by RAM
+  bandwidth, so: **8B Q8_0 ≈ 8 tok/s, 32B Q4_K_M ≈ 3.4 tok/s** on dual-channel
+  DDR5. Enable EXPO / the fastest stable RAM clock for more. The XDNA2 NPU does
+  **not** help (Ollama/llama.cpp can't use it).
+
+Because it's slow-but-strong, treat it as the escalation tier: run the cheap
+8B first-pass on a fast dGPU, and point the loop at the 32B box for the hard
+goals the 8B can't close (`configs/local-32b.toml` uses `samples = 8`,
+`concurrency = 1`, a long `timeout_s`, and keep `OLLAMA_KEEP_ALIVE` high so the
+~37 s model load isn't paid per call). `docs/gpu-box-setup.md` covers the
+remote/Tailscale wiring; the 8b vs 32b switch is just `GOEDEL_SIZE`.
+
+---
+
 ## Goal manifests (bottom-up proving)
 
 `leanloop run` defaults to scanning for every file containing `sorry`. For
