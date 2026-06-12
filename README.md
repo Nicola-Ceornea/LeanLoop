@@ -57,8 +57,10 @@ no-`sorry`/`admit`, no candidate-declared `axiom`s, no `native_decide`, and a
 the sqlite run log; single-machine and remote-Ollama deployment; and a
 **free interactive-frontier mode** (queue hard goals for a flat-rate Claude Code
 session via `/leanloop-frontier` + `leanloop submit`); and **spec assurance**
-(`leanloop vet`: counterexample search, vacuity detection, negation probing +
-an LLM plain-English review handoff — see "Spec assurance" below). The
+(`leanloop vet` counterexample/vacuity/negation probes + LLM review handoff,
+`leanloop mutate` spec-strength via Lean-definition mutation, `leanloop kat`
+spec-correctness via official test vectors — all four spec-error classes; see
+"Spec assurance"). The
 soundness gate is validated end-to-end against a real Lean toolchain
 (`tests/test_soundness.py`).
 
@@ -173,7 +175,7 @@ module  = "Extracted.Bits"
 context = "Disjoint-OR equals ADD; try Nat.eq_of_testBit_eq if search fails."
 
 [[goal]]
-module  = "Extracted.ForsSpec"   # uses Bits lemmas once they're proven
+module  = "Extracted.NextLemma"   # uses Bits lemmas once they're proven
 ```
 
 ```bash
@@ -307,9 +309,54 @@ LLM review is anchored to ground truth.
 **Division of labor:** the LLM *drafts and critiques* specs (it's good at
 translating Lean ↔ English and spotting gaps); the *trust* comes from the
 mechanical probes + the kernel. LLM opinion is never the acceptance signal.
-Heavier spec-assurance (Rust mutation testing — inject a bug, confirm the proof
-breaks; differential testing of the Lean model vs. the real Rust) is on the
-roadmap and slots into the same command.
+
+### The four classes of spec error, and what catches each
+
+`vet` is one of three spec-assurance commands. A spec can fail in four
+mechanical ways; LeanLoop now covers all four (design verified by the
+two-pass research in `docs/`):
+
+| spec error | what it means | command |
+|---|---|---|
+| **false** | provably wrong | `vet` (CEX/NEG) |
+| **vacuous** | true only because nothing satisfies its hypotheses | `vet` (HYP) |
+| **weak** | true & non-vacuous, but a *buggy* impl still satisfies it | **`mutate`** |
+| **wrong-property** | precise & strong, but about the *wrong thing* | **`kat`** |
+
+**`leanloop mutate` — spec STRENGTH.** Mutates the extracted Lean *definitions*
+(mCoq's method: mutate the model, never the proofs) and rebuilds the pinned
+proofs. A mutant the proofs **catch** = killed (good); one that **survives** =
+a bug no spec noticed, shown as a plain-English diff — *~85% of survivors are
+real spec gaps* (mCoq). Custom crypto operators flip domain-separator bytes,
+ADRS constants, length fields, shifts.
+
+```bash
+leanloop mutate Extracted/Parser/Funs.lean --build-target Extracted.ParserProofs --sample 20
+#   ✓killed 'bound 11→12'   ✗LIVED '8→9' (a constant the proofs don't pin — real gap)
+#   mutation score: …%   survivors listed as Rust/Lean diffs
+```
+
+**`leanloop kat` — spec WRONGNESS (the gap no probe can close).** Runs the
+project's executable Lean spec on official standard test vectors (NIST
+SLH-DSA / SPHINCS+ KATs) and requires **byte-equality**. This is the
+ML-KEM/SymCrypt "executable and testable specs" pattern: if the spec
+reproduces the standard's vectors *and* a kernel-checked refinement theorem
+ties spec → code, KAT-grounding is **transitive** — the verified code is
+anchored to the standard, not to a spec someone hoped was right.
+
+```toml
+[kat]
+module  = "Spec.MyScheme"
+adapter = "Spec.sign_bytes"   # a Lean `List UInt8 → List UInt8` view of the spec
+vectors = "vectors/slh-dsa-shake-128f.rsp"   # official KAT file (jsonl/hex/.rsp)
+```
+```bash
+leanloop kat        # ✓ N/N vectors passed — spec matches the standard byte-for-byte
+```
+(Validated end-to-end: a corrupted vector and a one-byte-wrong spec are both
+caught. It grounds *functional correctness on exercised paths* — **not**
+security properties, unexercised paths, or the abstraction function, which stay
+human review.)
 
 ## Trust chain (what a green run does and doesn't mean)
 

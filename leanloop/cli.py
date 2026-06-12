@@ -11,6 +11,9 @@
     leanloop bench        [-c cfg] [--samples N] [--goals M]
                                               measure prover tok/s + local close-rate
     leanloop vet MODULE   [-c cfg] [--explain] spec-assurance probes + English review
+    leanloop kat [MODULE] [-c cfg] [--vectors F]  run spec on official test vectors (byte-eq)
+    leanloop mutate [FILES] [-c cfg] [--build-target M] [--sample N]
+                                              measure spec strength (mutate defs, expect proofs to break)
     leanloop frontier     [-c cfg] [--next]   list (or print) interactive-frontier tasks
     leanloop submit GOAL  [-c cfg] [--candidate F]
                                               verify+apply an interactively-written proof
@@ -18,6 +21,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -326,6 +330,187 @@ def cmd_status(args) -> int:
         return 0
 
 
+def cmd_kat(args) -> int:
+    """Run the project's executable Lean spec over official test vectors and
+    require byte-equality — grounds the spec in external truth (the standard)."""
+    import subprocess
+    from . import kat
+    from .lean_runner import LeanRunner
+
+    cfg = _load(args)
+    k = cfg.kat
+    vectors_path = args.vectors or k.vectors
+    module = args.module or k.module
+    adapter = k.adapter
+    if not (module and adapter and vectors_path):
+        console.print("[red]kat needs [kat] module + adapter + vectors in config[/] "
+                      "(or --module/--vectors). The project must expose a Lean adapter "
+                      "`List UInt8 -> List UInt8` over its spec.")
+        return 2
+    vp = Path(vectors_path)
+    if not vp.exists():
+        console.print(f"[red]vectors file not found: {vp}[/]")
+        return 2
+
+    vectors = kat.parse_vectors(vp.read_text(), k.format,
+                                input_key=k.input_key, expected_key=k.expected_key)
+    problems = kat.validate(vectors)
+    if not vectors or problems:
+        console.print(f"[red]vector parse problems[/]: {problems[:5] or 'no vectors parsed'}")
+        return 2
+    console.rule(f"KAT — {module} over {len(vectors)} vectors")
+
+    runner = LeanRunner(cfg.project)
+    # rebuild the spec module first — `lake env lean --run` imports its .olean,
+    # which would otherwise be STALE if the spec source changed since last build
+    # (a stale olean silently tests the OLD spec — a real correctness trap).
+    bld = subprocess.run([cfg.project.lake, "build", module], cwd=runner.root,
+                         capture_output=True, text=True, timeout=1800)
+    if bld.returncode != 0:
+        console.print(f"[red]✗ spec module {module} does not build — fix it first[/]\n"
+                      f"{(bld.stdout + bld.stderr)[-600:]}")
+        return 2
+    harness = kat.build_harness(module, adapter)
+    hpath = runner.root / f"LeanLoopKat_{abs(hash(module)) % 10_000_000}.lean"
+    tsv = runner.root / f"LeanLoopKat_{abs(hash(module)) % 10_000_000}.tsv"
+    try:
+        hpath.write_text(harness)
+        tsv.write_text(kat.vectors_to_tsv(vectors))
+        res = subprocess.run([cfg.project.lake, "env", "lean", "--run", str(hpath), str(tsv)],
+                             cwd=runner.root, capture_output=True, text=True, timeout=1800)
+        out = (res.stdout + "\n" + res.stderr).strip()
+    finally:
+        for p in (hpath, tsv):
+            if p.exists():
+                p.unlink()
+
+    kr = kat.parse_harness_output(out)
+    if not kr.ran:
+        console.print(f"[red]✗ harness did not run — check the adapter type "
+                      f"(`{adapter}` must be `List UInt8 -> List UInt8`)[/]\n{out[-800:]}")
+        return 1
+    if kr.failures:
+        console.print(f"[red]✗ {kr.passed}/{kr.total} vectors passed — SPEC DOES NOT "
+                      f"MATCH THE STANDARD:[/]")
+        for name, why in kr.failures[:10]:
+            console.print(f"  [red]FAIL[/] {name}: {why}")
+        return 1
+    console.print(f"[green]✓ {kr.passed}/{kr.total} vectors passed — the spec reproduces "
+                  f"the official vectors byte-for-byte.[/]")
+    console.print("[dim]grounds functional correctness on the exercised paths; does NOT "
+                  "cover security properties, unexercised paths, or the abstraction "
+                  "function (human review).[/]")
+    return 0
+
+
+def cmd_mutate(args) -> int:
+    """Measure spec STRENGTH: mutate the extracted Lean definitions and check
+    that the pinned proofs catch each injected bug (mCoq proof-break scoring)."""
+    from . import mutate as M
+    from .lean_runner import LeanRunner
+
+    cfg = _load(args)
+    runner = LeanRunner(cfg.project)
+    target = args.build_target or cfg.mutate.build_target or cfg.project.default_target
+    if not target:
+        console.print("[red]mutate needs a build target[/] (mutate.build_target / "
+                      "project.default_target / --build-target) — the module whose proofs "
+                      "must catch the bug.")
+        return 2
+
+    # which files to mutate
+    files = list(args.files) if args.files else cfg.mutate.target_files
+    if not files:
+        console.print("[red]no target files[/] — pass files or set mutate.target_files "
+                      "(the extracted DEFINITION files, e.g. Extracted/Parser/Funs.lean).")
+        return 2
+
+    # 0) baseline: the target must build clean before we start
+    import subprocess
+    console.rule("mutate — baseline build")
+    b = subprocess.run([cfg.project.lake, "build", target], cwd=runner.root,
+                       capture_output=True, text=True, timeout=1800)
+    if b.returncode != 0:
+        console.print(f"[red]baseline build of {target} FAILS — fix that first[/]\n"
+                      f"{(b.stdout + b.stderr)[-600:]}")
+        return 2
+    console.print(f"[green]baseline {target} builds clean[/]")
+
+    # 1) generate mutants
+    all_mutants: list[M.Mutant] = []
+    for rel in files:
+        fp = runner.root / rel
+        if not fp.exists():
+            console.print(f"[yellow]skip missing file: {rel}[/]")
+            continue
+        all_mutants += M.generate_mutants(rel, fp.read_text(),
+                                          max_per_file=cfg.mutate.max_per_file)
+    if cfg.mutate.sample and len(all_mutants) > cfg.mutate.sample:
+        all_mutants = all_mutants[: cfg.mutate.sample]
+    if args.sample and len(all_mutants) > args.sample:
+        all_mutants = all_mutants[: args.sample]
+    console.print(f"generated {len(all_mutants)} mutant(s) across {len(files)} file(s)")
+
+    # 2) apply -> rebuild -> judge -> revert
+    results: list[M.MutantResult] = []
+    for i, m in enumerate(all_mutants, 1):
+        fp = runner.root / m.file
+        orig = fp.read_text()
+        try:
+            mutated = M.apply_mutant(orig, m)
+            if mutated == orig:
+                results.append(M.MutantResult(m, "error", "could not apply"))
+                continue
+            fp.write_text(mutated)
+            r = subprocess.run([cfg.project.lake, "build", target], cwd=runner.root,
+                               capture_output=True, text=True, timeout=1800)
+            out = (r.stdout + r.stderr)
+            if r.returncode != 0:
+                # did the DEFINITION fail to elaborate (unviable) or a PROOF break (killed)?
+                unviable = bool(re.search(r"(unsolved goals|type mismatch|unknown identifier"
+                                          r"|failed to synth)", out)) and "sorry" not in out
+                # heuristic: a proof break usually cites a theorem; treat any build
+                # failure as killed unless the mutated file itself failed to elaborate
+                outcome = "unviable" if (m.file in out and "error" in out and
+                                         "linter" not in out and "_vet" not in out
+                                         and _looks_unviable(out, m.file)) else "killed"
+                results.append(M.MutantResult(m, outcome, out[-400:]))
+            else:
+                results.append(M.MutantResult(m, "lived"))
+        except subprocess.TimeoutExpired:
+            results.append(M.MutantResult(m, "timeout"))
+        finally:
+            fp.write_text(orig)
+        mark = {"killed": "[green]✓killed[/]", "lived": "[red]✗LIVED[/]",
+                "unviable": "[dim]unviable[/]", "timeout": "[yellow]timeout[/]",
+                "error": "[dim]error[/]"}[results[-1].outcome]
+        console.print(f"  [{i}/{len(all_mutants)}] {mark} {m.name}")
+
+    # 3) score + report survivors
+    sc = M.score(results)
+    console.rule("mutate — spec strength")
+    score_str = f"{sc['mutation_score']}%" if sc["mutation_score"] is not None else "n/a"
+    console.print(f"[bold]mutation score: {score_str}[/]  "
+                  f"(killed {sc['killed']}, [red]lived {sc['lived']}[/], "
+                  f"unviable {sc['unviable']}, timeout {sc['timeout']})")
+    if sc["survivors"]:
+        console.print("\n[red]SURVIVORS — bugs no proof caught (spec gaps):[/]")
+        for s in sc["survivors"]:
+            console.print(s)
+        console.print("\n[dim]~85% of survivors are real spec gaps (mCoq); the rest are "
+                      "equivalent mutants. Each is a place your spec under-constrains.[/]")
+    return 0 if sc["lived"] == 0 else 1
+
+
+def _looks_unviable(build_out: str, mutated_file: str) -> bool:
+    """The build failed inside the MUTATED definition file itself (mutant won't
+    elaborate) rather than in a downstream proof — exclude from the score."""
+    # errors are reported as `path:line:col: error`; if the only errored file is
+    # the mutated one, the mutant is unviable, not killed.
+    errored = set(re.findall(r"([\w./-]+\.lean):\d+:\d+: error", build_out))
+    return errored == {mutated_file} or (mutated_file in errored and len(errored) == 1)
+
+
 def cmd_bench(args) -> int:
     """Phase-0 benchmark: prover tokens/sec on this GPU + local-tier close-rate."""
     import time
@@ -583,6 +768,15 @@ def main(argv: list[str] | None = None) -> int:
     sv.add_argument("module", help="dotted module whose theorems to vet")
     sv.add_argument("--explain", action="store_true",
                     help="also produce the plain-English adversarial spec review")
+    sk = sub.add_parser("kat", parents=[common],
+                        help="run the executable Lean spec over official test vectors (byte-equality)")
+    sk.add_argument("module", nargs="?", default="", help="spec module (or [kat] module)")
+    sk.add_argument("--vectors", default="", help="KAT vector file (or [kat] vectors)")
+    sm = sub.add_parser("mutate", parents=[common],
+                        help="measure spec STRENGTH by mutating Lean definitions (proof-break scoring)")
+    sm.add_argument("files", nargs="*", help="Lean definition files to mutate (or mutate.target_files)")
+    sm.add_argument("--build-target", default="", help="module to rebuild to detect a broken proof")
+    sm.add_argument("--sample", type=int, default=0, help="cap total mutants (0 = all)")
     sf = sub.add_parser("frontier", parents=[common],
                         help="list the interactive-frontier queue (backend=queue)")
     sf.add_argument("--next", action="store_true",
@@ -604,6 +798,8 @@ def main(argv: list[str] | None = None) -> int:
         "status": cmd_status,
         "bench": cmd_bench,
         "vet": cmd_vet,
+        "kat": cmd_kat,
+        "mutate": cmd_mutate,
         "frontier": cmd_frontier,
         "submit": cmd_submit,
     }[args.cmd](args)

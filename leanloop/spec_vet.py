@@ -189,22 +189,47 @@ def _extract_witness(out: str) -> str:
 # the explain prompt (the LLM half: translate the spec for a human reviewer)
 # --------------------------------------------------------------------------- #
 EXPLAIN_PROMPT = """You are reviewing a formal specification for someone who does NOT read Lean.
-For EACH theorem below, produce:
+Your job is adversarial: find what the spec FAILS to capture, not to praise it.
+The Lean kernel already guarantees the code matches this spec — the only open
+question is whether the SPEC says the right thing. Do not restate the Lean;
+translate it. For EACH theorem below, produce sections 1-5.
 
 1. **Plain-English claim** — one or two sentences: what does this theorem
-   actually guarantee? Be precise about quantifiers ("for every input…").
-2. **What it does NOT say** — the most important gaps: properties a reader
-   might assume are covered but aren't (e.g. it bounds a value but doesn't pin
-   it; it covers one function but not its caller; hypotheses that narrow the
-   claim).
-3. **Spec-gaming check** — could a wrong implementation still satisfy this
-   statement? How would you strengthen it?
-4. **Verdict** — SOUND-AND-USEFUL / TOO-WEAK / SUSPICIOUS, with one sentence.
+   actually guarantee, for which inputs? Be precise about quantifiers
+   ("for EVERY input…", "ASSUMING x < n…").
 
-Be adversarial: your job is to find what the spec fails to capture, not to
-praise it. Do not restate the Lean; translate it.
+2. **What it does NOT say** — the gaps a reader might wrongly assume are
+   covered: it bounds a value but doesn't pin it; covers one function but not
+   its caller; hypotheses that silently narrow the claim; the happy path but
+   not error paths.
 
-Mechanical probe results (kernel/test-backed, trust these over intuition):
+3. **Strength audit** (this is the load-bearing check — research shows a
+   test-passing spec kills real bugs only ~60% of the time). Classify the
+   conclusion:
+   - WEAK-CLASS if it's only a type/format/null/bound check, an existence
+     ("∃ … ok"), or a one-sided inequality. These let many wrong
+     implementations pass — FLAG them and say what stronger claim is missing.
+   - STRONG-CLASS if it's a full functional equality (output = exact spec
+     function) or a tight two-sided bound. Confirm it pins the behavior.
+
+4. **Reconstruct-and-compare** (Clover triangle): from the theorem statement
+   ALONE, write the one-sentence behavior you'd expect the function to have.
+   Then read the actual function/definition in the file. Do they match? A
+   mismatch — or a statement you can't reconstruct a clear behavior from — is
+   a red flag (the spec may describe the wrong property).
+
+5. **Misalignment / spec-gaming check** (AlphaVerus): give ONE concrete wrong
+   implementation that would still satisfy this exact statement. If you can
+   write a plausible one easily, the spec is too weak — say how to strengthen
+   it. If the only impls that pass are correct ones, say so.
+
+End each theorem with a one-line **VERDICT**: SOUND-AND-USEFUL / TOO-WEAK /
+SUSPICIOUS-MAY-BE-WRONG-PROPERTY, and a final note on what a human still has
+to judge by hand (security properties, unexercised paths, whether the spec's
+notion of "correct" matches the real-world requirement — these are NOT
+mechanically checkable).
+
+Mechanical probe results (kernel/test-backed — trust these over intuition):
 {probes}
 
 The specification file:

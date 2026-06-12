@@ -161,6 +161,33 @@ class AuditConfig:
 
 
 # --------------------------------------------------------------------------- #
+# Spec-assurance: KAT anchoring + mutation
+# --------------------------------------------------------------------------- #
+@dataclass
+class KatConfig:
+    """Anchor an executable Lean spec to official test vectors (`leanloop kat`).
+    The project exposes its spec as an adapter `List UInt8 -> List UInt8`."""
+    module: str = ""                 # Lean module exposing the spec adapter
+    adapter: str = ""                # Lean term of type `List UInt8 -> List UInt8`
+    vectors: str = ""               # path to the KAT file (relative to cwd or abs)
+    format: str = "auto"             # "auto" | "jsonl" | "hex" | "rsp"
+    input_key: str = "input"         # jsonl/rsp field names
+    expected_key: str = "expected"
+
+
+@dataclass
+class MutateConfig:
+    """Spec-strength via Lean-definition mutation (`leanloop mutate`)."""
+    # Lean definition files to mutate (relative to project.root). Empty = all
+    # files under project.root NOT containing theorems (best-effort).
+    target_files: list[str] = field(default_factory=list)
+    # module to `lake build` to detect a broken proof (default: project default_target)
+    build_target: str = ""
+    max_per_file: int = 40           # cap mutants per file
+    sample: int = 0                  # 0 = all; else random-free first-N (deterministic)
+
+
+# --------------------------------------------------------------------------- #
 # Top-level
 # --------------------------------------------------------------------------- #
 @dataclass
@@ -172,6 +199,8 @@ class Config:
     db_path: str = "leanloop_runs.sqlite"
     # where the `queue` frontier backend drops tasks for an interactive session.
     frontier_queue_dir: str = "leanloop_frontier_queue"
+    kat: KatConfig = field(default_factory=KatConfig)
+    mutate: MutateConfig = field(default_factory=MutateConfig)
 
     # ------------------------------------------------------------------ #
     @staticmethod

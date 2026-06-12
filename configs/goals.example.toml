@@ -8,5 +8,5 @@ name    = "bit-arithmetic foundation"
 context = "Disjoint-OR equals ADD; if library search fails, prove via Nat.eq_of_testBit_eq + Nat.testBit_lor/testBit_shiftLeft."
 
 [[goal]]
-module  = "Extracted.ForsSpec"
+module  = "Extracted.NextLemma"
 context = "Uses the Bits lemmas above. Aeneas monadic goal — try `progress` / `step*` then `scalar_tac` before whole-proof sampling."
