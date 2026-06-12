@@ -32,6 +32,10 @@ case "$SIZE" in
   *)   echo "GOEDEL_SIZE must be '8b' or '32b' (got '$SIZE')"; exit 1 ;;
 esac
 QUANT="${GOEDEL_QUANT:-$DEFAULT_QUANT}"
+# parallel slots for --serve-lan: 2 suits the 8B on a fast dGPU; the 32B is
+# memory-bandwidth-bound, so 1 slot gives the full tok/s (override: OLLAMA_PARALLEL).
+DEFAULT_PARALLEL=2; [ "$SIZE" = "32b" ] && DEFAULT_PARALLEL=1
+PARALLEL="${OLLAMA_PARALLEL:-$DEFAULT_PARALLEL}"
 GGUF_DIR="${GGUF_DIR:-$HOME/models}"
 GGUF_FILE="${BASE}.${QUANT}.gguf"
 # Verified to exist (mradermacher repos, June 2026): 8B {Q8_0, Q6_K}; 32B
@@ -73,12 +77,12 @@ if [ "${1:-}" = "--serve-lan" ]; then
   echo "== configuring Ollama to listen on 0.0.0.0 (LAN) =="
   if [ -d /etc/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
     sudo mkdir -p /etc/systemd/system/ollama.service.d
-    # OLLAMA_NUM_PARALLEL must match LeanLoop's [prover.local] concurrency (default 2)
-    # or concurrent samples queue instead of batching. OLLAMA_HOST opens the LAN.
-    printf '[Service]\nEnvironment="OLLAMA_HOST=0.0.0.0"\nEnvironment="OLLAMA_NUM_PARALLEL=2"\n' | \
+    # OLLAMA_NUM_PARALLEL must match LeanLoop's [prover.local] concurrency
+    # (8B default 2; 32B default 1) or samples queue/contend. OLLAMA_HOST opens the LAN.
+    printf '[Service]\nEnvironment="OLLAMA_HOST=0.0.0.0"\nEnvironment="OLLAMA_NUM_PARALLEL=%s"\n' "$PARALLEL" | \
       sudo tee /etc/systemd/system/ollama.service.d/leanloop-lan.conf >/dev/null
     sudo systemctl daemon-reload && sudo systemctl restart ollama
-    echo "Ollama now listens on 0.0.0.0:11434 with NUM_PARALLEL=2 (systemd override installed)."
+    echo "Ollama now listens on 0.0.0.0:11434 with NUM_PARALLEL=$PARALLEL (systemd override installed)."
   else
     echo "No systemd detected — start manually with: OLLAMA_HOST=0.0.0.0 ollama serve"
   fi
@@ -109,6 +113,14 @@ TROUBLESHOOTING (AMD RX 6950 XT / RDNA2, gfx1030):
       sudo systemctl daemon-reload && sudo systemctl restart ollama
   * Verify GPU offload:  ollama ps   (should show 100% GPU for the model)
   * ROCm missing entirely: install AMD's rocm packages for your distro first.
+
+32B ON A 16 GB dGPU (e.g. the 6950 XT): it RUNS via partial offload — Ollama
+puts ~3/4 of the layers in VRAM and streams the rest from system RAM. Expect
+`ollama ps` to show a CPU/GPU split (that is EXPECTED, not a fault) and
+roughly 2-4x an APU's tok/s, far below a fully-resident model. Settings that
+matter: concurrency=1 / OLLAMA_PARALLEL=1, and a MODEST num_ctx — on a dGPU
+every GB of KV cache evicts another layer to the slow CPU side. Run
+`leanloop bench` to decide whether 32B-partial beats 8B-resident on your box.
 
 AMD iGPU / APU (e.g. Ryzen AI 9 HX 370 + Radeon 890M, Strix Point):
   * No ROCm needed — Ollama 0.24+ drives the iGPU via its VULKAN backend.

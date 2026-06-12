@@ -18,6 +18,12 @@
 root = "/path/to/your/aeneas-lean-project"   # contains lakefile + lean-toolchain
 lake = "lake"
 
+[prover]
+# the 32B is the slow QUALITY tier: 8 samples + self-correction at ~3 tok/s
+# routinely exceed the default 1 h goal budget — give each goal 3 h before it
+# falls through to the frontier queue.
+goal_timeout_s = 10800
+
 [prover.local]
 enabled  = true
 backend  = "ollama"
@@ -33,7 +39,15 @@ temperatures = [0.7, 1.0]
 # spare bandwidth + memory.
 concurrency  = 1
 self_correct_rounds = 2
-# Generous: a 32B proof attempt at ~3.4 tok/s can run a couple of minutes.
+# Cap generation so a runaway sample self-terminates inside the HTTP timeout:
+# 4096 tokens at ~3 tok/s ≈ 23 min < timeout_s. (Goedel proofs are typically
+# 500-2000 tokens; the default 32768 would waste a 30-min slot on a ramble.)
+max_tokens = 4096
+# KV cache scales with num_ctx: 24576 would cost ~6 GB on a 32B. 12288 is
+# ample for goal+plan+proof, and on a 16 GB dGPU (partial offload) every GB of
+# KV evicts another layer to the slow CPU side.
+num_ctx = 12288
+# Generous: a 32B proof attempt at ~3.4 tok/s can run many minutes.
 timeout_s = 1800
 
 [prover.frontier]

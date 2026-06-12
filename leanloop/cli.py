@@ -217,7 +217,7 @@ def cmd_doctor(args) -> int:
             on_gpu = pct >= 99
             ck(None if not on_gpu else True,
                f"loaded '{m.get('name')}': {pct}% on GPU "
-               f"({'GPU-resident' if on_gpu else 'partially on CPU — slow; check ROCm/VRAM'})")
+               f"({'GPU-resident' if on_gpu else 'partial CPU offload — EXPECTED for a model bigger than VRAM (e.g. 32B on 16 GB); otherwise check ROCm/VRAM'})")
     else:
         ck(None, "local prover disabled in config")
 

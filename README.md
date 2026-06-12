@@ -165,10 +165,11 @@ Ollama and want llama.cpp's parallel slots tuned by hand.
 ## The 32B prover on an iGPU / APU box (shared-memory capacity tier)
 
 Goedel-Prover-V2 also ships a **32B** that is markedly stronger than the 8B —
-but at ~26 GB (Q4_K_M + KV) it **won't fit a 16 GB dGPU** like the 6950 XT. It
-*does* run on an **iGPU/APU with enough shared system memory**, which makes a
-laptop/mini-PC APU a genuine *capacity tier*: it hosts the bigger model your
-discrete card can't.
+but at ~26 GB (Q4_K_M + KV) it **won't fit fully resident in a 16 GB dGPU**
+like the 6950 XT (a 16 GB card can still run it via *partial offload* — see
+below). It runs *fully* on an **iGPU/APU with enough shared system memory**,
+which makes a laptop/mini-PC APU a genuine *capacity tier*: it hosts the
+bigger model your discrete card can't hold whole.
 
 Tested target: **AMD Ryzen AI 9 HX 370 + Radeon 890M (Strix Point), DDR5.**
 
@@ -201,6 +202,27 @@ goals the 8B can't close (`configs/local-32b.toml` uses `samples = 8`,
 `concurrency = 1`, a long `timeout_s`, and keep `OLLAMA_KEEP_ALIVE` high so the
 ~37 s model load isn't paid per call). `docs/gpu-box-setup.md` covers the
 remote/Tailscale wiring; the 8b vs 32b switch is just `GOEDEL_SIZE`.
+
+### Can a 16 GB dGPU (6950 XT) run the 32B too?
+
+Yes — **via partial offload**, with the right settings. Ollama automatically
+puts ~3/4 of the Q4_K_M layers in VRAM and streams the rest from system RAM
+through the CPU; `ollama ps` then shows a CPU/GPU split, which is **expected,
+not a fault**. Per-token speed is gated by the CPU-resident slice, so expect
+roughly **2–4× an APU's tok/s** (≈ 7–12 tok/s with desktop RAM) — well below
+what a fully-resident model would do. Settings that matter:
+
+* `concurrency = 1` and `OLLAMA_PARALLEL=1` (the setup script defaults to 1
+  for `GOEDEL_SIZE=32b`) — parallel slots just split bandwidth.
+* **Keep `num_ctx` modest** (`local-32b.toml` uses 12288): on a dGPU every GB
+  of KV cache evicts another layer to the slow CPU side — this matters far
+  more than on an APU's shared memory.
+* Stay on **Q4_K_M**, not Q3: formal output is quant-sensitive, and Q3_K_M's
+  ~16 GB would still leave no KV room anyway.
+* The 32B evicts the 8B from the card. Rule of thumb: pass@8 with the 32B at
+  ~10 tok/s costs about the same wall-clock as pass@32 with the 8B — run
+  `leanloop bench --goals N` with each and keep whichever closes more goals
+  per hour. (The two-box split — 8B on the dGPU, 32B on the APU — keeps both.)
 
 ---
 
