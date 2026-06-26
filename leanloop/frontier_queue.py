@@ -81,13 +81,29 @@ The local prover tier could not close this goal. Prove it here in this
 interactive Claude Code session (subscription flat-rate — no metered API cost).
 
 ## Do this
-1. Write a COMPLETE Lean 4 file that proves the goal below to:
+1. GROUND every step against the LIVE kernel via the `lean-lsp` MCP tools — do
+   NOT guess tactics blind. The lean-lsp server is mounted on this Lean project
+   (`LEAN_PROJECT_PATH`); reason against the real goal state, not your memory:
+   - `lean_goal` (line/col) — the ACTUAL proof state before/after a tactic.
+     Omit `column` for the before/after at a line; "no goals" = closed.
+   - `lean_multi_attempt` — try several tactics at a position WITHOUT editing
+     the file; keep the one that advances/closes the goal.
+   - `lean_hammer_premise` / `lean_state_search` — surface candidate closing
+     lemmas for the current goal; `lean_local_search` / `lean_loogle` /
+     `lean_leansearch` — find a project/mathlib lemma by name or type pattern
+     before reinventing it.
+   - `lean_diagnostic_messages` — the exact compiler errors after an edit
+     ("no goals to be solved" = remove the trailing tactic).
+   - `lean_verify <fully.qualified.name>` — axiom check + source scan; the final
+     `submit` gate re-checks `#print axioms`, but verify as you go.
+2. Write a COMPLETE Lean 4 file that proves the goal below to:
    `{task.candidate_path}`
-2. Verify it through LeanLoop's gates (this APPLIES it to the project if it passes):
+3. Verify it through LeanLoop's gates (this APPLIES it to the project if it passes):
    ```
    leanloop {cfg_arg}submit {goal.name}
    ```
-3. If rejected, read the gate error, revise `{task.candidate_path}`, and submit again.
+4. If rejected, read the gate error (`lean_diagnostic_messages` pinpoints it),
+   revise `{task.candidate_path}`, and submit again.
 
 ## Acceptance criteria (your proof MUST satisfy all)
 - Prove EXACTLY these theorem(s) — same name, same signature, do **not** weaken/rename:

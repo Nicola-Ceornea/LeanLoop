@@ -56,7 +56,11 @@ no-`sorry`/`admit`, no candidate-declared `axiom`s, no `native_decide`, and a
 **fail-closed** `#print axioms` closure check; goal scan + ordered manifests;
 the sqlite run log; single-machine and remote-Ollama deployment; and a
 **free interactive-frontier mode** (queue hard goals for a flat-rate Claude Code
-session via `/leanloop-frontier` + `leanloop submit`); and **spec assurance**
+session via `/leanloop-frontier` + `leanloop submit`; each frontier TASK now
+instructs the session to GROUND every step against the live kernel via the
+`lean-lsp` MCP — `lean_goal`/`lean_multi_attempt`/`lean_hammer_premise`/
+`lean_diagnostic_messages`/`lean_verify` — i.e. reason against the real proof
+state, not guesses); and **spec assurance**
 (`leanloop vet` counterexample/vacuity/negation probes + LLM review handoff,
 `leanloop mutate` spec-strength via Lean-definition mutation, `leanloop kat`
 spec-correctness via official test vectors — all four spec-error classes; see
