@@ -62,9 +62,9 @@ instructs the session to GROUND every step against the live kernel via the
 `lean_diagnostic_messages`/`lean_verify` — i.e. reason against the real proof
 state, not guesses); and **spec assurance**
 (`leanloop vet` counterexample/vacuity/negation probes + LLM review handoff,
-`leanloop mutate` spec-strength via Lean-definition mutation, `leanloop kat`
-spec-correctness via official test vectors — all four spec-error classes; see
-"Spec assurance"). The
+`leanloop necessity` dead-premise detection, `leanloop mutate` spec-strength via
+Lean-definition mutation, `leanloop kat` spec-correctness via official test
+vectors — all five spec-error classes; see "Spec assurance"). The
 soundness gate is validated end-to-end against a real Lean toolchain
 (`tests/test_soundness.py`).
 
@@ -381,14 +381,15 @@ mechanical probes + the kernel. LLM opinion is never the acceptance signal.
 
 ### The four classes of spec error, and what catches each
 
-`vet` is one of three spec-assurance commands. A spec can fail in four
-mechanical ways; LeanLoop now covers all four (design verified by the
+`vet` is one of four spec-assurance commands. A spec can fail in five
+mechanical ways; LeanLoop now covers all five (design verified by the
 two-pass research in `docs/`):
 
 | spec error | what it means | command |
 |---|---|---|
 | **false** | provably wrong | `vet` (CEX/NEG) |
 | **vacuous** | true only because nothing satisfies its hypotheses | `vet` (HYP) |
+| **dead premise** | declares a hypothesis the proof never uses (the theorem holds *without* it — the signature misleads) | **`necessity`** |
 | **weak** | true & non-vacuous, but a *buggy* impl still satisfies it | **`mutate`** |
 | **wrong-property** | precise & strong, but about the *wrong thing* | **`kat`** |
 
@@ -403,6 +404,25 @@ ADRS constants, length fields, shifts.
 leanloop mutate Extracted/Parser/Funs.lean --build-target Extracted.ParserProofs --sample 20
 #   ✓killed 'bound 11→12'   ✗LIVED '8→9' (a constant the proofs don't pin — real gap)
 #   mutation score: …%   survivors listed as Rust/Lean diffs
+```
+
+**`leanloop necessity` — DEAD-PREMISE detection (does the proof use what it
+declares?).** The non-circular sibling of `mutate`: where `mutate` perturbs the
+*definitions*, `necessity` drops each PROVEN theorem's leaf hypotheses one at a
+time and rebuilds the SAME proof. A drop that **breaks** the build = the proof
+used it (load-bearing); a drop that **still builds** = a *dead premise* — the
+theorem holds without that assumption, so its signature claims a narrower
+conditional than it proves (or the hypothesis is decoration that misleads a
+reader). Orthogonal to `vet` HYP (which asks whether the hypotheses are
+*satisfiable*, not whether they are *used*). This is the slice of proof-mutation
+`mutate` deliberately skips as "circular" — dropping a *statement* hypothesis
+and re-running the unchanged proof tests consumption, it never rewrites the proof.
+
+```bash
+leanloop necessity Extracted.Bits
+#   ✓used Extracted.Bits.foo: drop (h : 0 < n)     (the proof needed it)
+#   ✗DEAD Extracted.Bits.bar: drop (h : x < 256)   (proof builds without it — remove or use)
+#   necessity score: …%   dead premises listed per theorem
 ```
 
 **`leanloop kat` — spec WRONGNESS (the gap no probe can close).** Runs the

@@ -511,6 +511,76 @@ def _looks_unviable(build_out: str, mutated_file: str) -> bool:
     return errored == {mutated_file} or (mutated_file in errored and len(errored) == 1)
 
 
+def cmd_necessity(args) -> int:
+    """Dead-premise check: for each PROVEN theorem in `module`, drop each leaf
+    hypothesis and rebuild — a proof that still builds never used it (V4 dead
+    conjunct). The non-circular sibling of `mutate` (which perturbs definitions);
+    orthogonal to `vet` HYP (which checks satisfiability, not consumption)."""
+    from . import premise as P
+    from .lean_runner import LeanRunner
+    from .leantext import strip_comments
+
+    cfg = _load(args)
+    runner = LeanRunner(cfg.project)
+    rel = Path(*args.module.split(".")).with_suffix(".lean")
+    target = runner.root / rel
+    if not target.exists():
+        console.print(f"[red]module not found:[/] {target}")
+        return 2
+    src = target.read_text()
+    if re.search(r"\bsorry\b", strip_comments(src)):
+        console.print(f"[red]{args.module} still contains `sorry`[/] — necessity needs a "
+                      "PROVEN module (it tests whether the proof uses each hypothesis).")
+        return 2
+
+    # baseline: the module must build clean before we perturb it.
+    console.rule("necessity — baseline build")
+    base = runner.verify(src, [], module_stem=args.module)
+    if not base.build_ok:
+        console.print(f"[red]baseline build of {args.module} FAILS — fix that first[/]\n"
+                      f"{base.errors[-600:]}")
+        return 2
+    console.print(f"[green]baseline {args.module} builds clean[/]")
+
+    variants = P.build_variants(src)
+    if args.sample and len(variants) > args.sample:
+        variants = variants[: args.sample]
+    if not variants:
+        console.print("[dim]no leaf-hypothesis binders to drop — every binder is a "
+                      "parameter the theorems are about (nothing to test).[/]")
+        return 0
+    console.print(f"checking {len(variants)} declared hypothesis/-es for actual use")
+
+    results: list[P.NecessityResult] = []
+    for i, v in enumerate(variants, 1):
+        names = []
+        for b in P.split_binder_groups(v.dropped.strip("()")):
+            names += b.names
+        names = names or [v.dropped]
+        r = runner.verify(v.code, [], module_stem=args.module)
+        outcome = P.classify(r.build_ok, r.errors, names)
+        results.append(P.NecessityResult(v, outcome, r.errors[-300:]))
+        mark = {"killed": "[green]✓used[/]", "lived": "[red]✗DEAD[/]",
+                "unviable": "[dim]unviable[/]", "timeout": "[yellow]timeout[/]",
+                "error": "[dim]error[/]"}[outcome]
+        console.print(f"  [{i}/{len(variants)}] {mark} {v.theorem_fqn}: drop {v.dropped}")
+
+    sc = P.score(results)
+    console.rule("necessity — premise load-bearingness")
+    s = f"{sc['necessity_score']}%" if sc["necessity_score"] is not None else "n/a"
+    console.print(f"[bold]necessity score: {s}[/]  (used {sc['load_bearing']}, "
+                  f"[red]dead {sc['dead_premises']}[/], unviable {sc['unviable']}, "
+                  f"timeout {sc['timeout']})")
+    if sc["dead"]:
+        console.print("\n[red]DEAD PREMISES — hypotheses no proof consumed:[/]")
+        for d in sc["dead"]:
+            console.print(f"  {d}")
+        console.print("\n[dim]A dead premise means the theorem holds WITHOUT that "
+                      "assumption (it is stronger than its signature implies), or the "
+                      "assumption is decoration that misleads a reader. Remove it or use it.[/]")
+    return 0 if sc["dead_premises"] == 0 else 1
+
+
 def cmd_bench(args) -> int:
     """Phase-0 benchmark: prover tokens/sec on this GPU + local-tier close-rate."""
     import time
@@ -777,6 +847,11 @@ def main(argv: list[str] | None = None) -> int:
     sm.add_argument("files", nargs="*", help="Lean definition files to mutate (or mutate.target_files)")
     sm.add_argument("--build-target", default="", help="module to rebuild to detect a broken proof")
     sm.add_argument("--sample", type=int, default=0, help="cap total mutants (0 = all)")
+    sn = sub.add_parser("necessity", parents=[common],
+                        help="dead-premise check: drop each PROVEN theorem's leaf hypotheses, "
+                             "expect the proof to break (mutate.py's non-circular sibling)")
+    sn.add_argument("module", help="dotted module of PROVEN theorems to check (no sorry)")
+    sn.add_argument("--sample", type=int, default=0, help="cap total dropped-hyp variants (0 = all)")
     sf = sub.add_parser("frontier", parents=[common],
                         help="list the interactive-frontier queue (backend=queue)")
     sf.add_argument("--next", action="store_true",
@@ -800,6 +875,7 @@ def main(argv: list[str] | None = None) -> int:
         "vet": cmd_vet,
         "kat": cmd_kat,
         "mutate": cmd_mutate,
+        "necessity": cmd_necessity,
         "frontier": cmd_frontier,
         "submit": cmd_submit,
     }[args.cmd](args)
