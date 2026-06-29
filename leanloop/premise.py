@@ -208,6 +208,7 @@ class Variant:
     theorem_fqn: str
     dropped: str          # the binder text removed
     rationale: str
+    dropped_names: list[str] = field(default_factory=list)  # the bound names (for classify)
     code: str = field(repr=False, default="")  # full stripped-file text, binder removed
 
 
@@ -227,7 +228,8 @@ def build_variants(file_text: str) -> list[Variant]:
             out.append(Variant(
                 sp.fqn, b.text.strip(),
                 f"the proof of {sp.fqn} may not use the hypothesis {b.text.strip()}",
-                variant_code))
+                dropped_names=list(b.names),
+                code=variant_code))
     return out
 
 
@@ -251,9 +253,13 @@ def classify(build_ok: bool, build_output: str, dropped_names: list[str]) -> str
     if any(re.search(rf"unknown (?:identifier|constant) '?{re.escape(nm)}'?", out)
            for nm in dropped_names):
         return "killed"
-    # a proof/goal failure means the proof genuinely consumed the hypothesis
-    if re.search(r"unsolved goals|linarith failed|omega could not|simp made no progress"
-                 r"|type mismatch|failed to|no goals|tactic '", out):
+    # a proof/goal failure means the proof genuinely consumed the hypothesis.
+    # `unknown identifier|constant` (belt-and-braces): a dropped hypothesis the
+    # proof referenced by name breaks here REGARDLESS of name-extraction — the
+    # baseline built clean, so a new unknown-identifier is the removed binder.
+    if re.search(r"unknown identifier|unknown constant|unsolved goals|linarith failed"
+                 r"|omega could not|simp made no progress|type mismatch|failed to"
+                 r"|no goals|tactic '", out):
         return "killed"
     return "unviable"
 

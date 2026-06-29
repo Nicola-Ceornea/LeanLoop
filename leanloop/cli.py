@@ -553,10 +553,7 @@ def cmd_necessity(args) -> int:
 
     results: list[P.NecessityResult] = []
     for i, v in enumerate(variants, 1):
-        names = []
-        for b in P.split_binder_groups(v.dropped.strip("()")):
-            names += b.names
-        names = names or [v.dropped]
+        names = v.dropped_names or [v.dropped]
         r = runner.verify(v.code, [], module_stem=args.module)
         outcome = P.classify(r.build_ok, r.errors, names)
         results.append(P.NecessityResult(v, outcome, r.errors[-300:]))

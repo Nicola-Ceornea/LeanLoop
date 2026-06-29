@@ -58,8 +58,20 @@ def test_build_variants_drops_the_binder_from_signature():
     # n is a parameter (in conclusion) -> not dropped; h is the leaf assumption.
     assert len(vs) == 1
     assert vs[0].dropped == "(h : n < 5)"
+    assert vs[0].dropped_names == ["h"]            # carried for classify (integration seam)
     assert "(h : n < 5)" not in vs[0].code
     assert "(n : Nat)" in vs[0].code and ": n < 10" in vs[0].code
+
+
+def test_integration_seam_named_hyp_drop_is_killed_not_unviable():
+    # The bug the advisor caught: a proof using `exact h` drops to
+    # `unknown identifier 'h'`. build_variants must carry names=["h"] so classify
+    # routes it to KILLED, not UNVIABLE. Drives the names path end-to-end.
+    src = "theorem t (h : P) : P := h\n"
+    vs = build_variants(src)
+    assert len(vs) == 1 and vs[0].dropped_names == ["h"]
+    lake_output = "error: unknown identifier 'h'"
+    assert classify(False, lake_output, vs[0].dropped_names) == "killed"
 
 
 def test_build_variants_none_when_no_leaf_hyp():
