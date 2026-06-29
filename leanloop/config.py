@@ -117,6 +117,13 @@ class FrontierProverConfig:
 @dataclass
 class ProverStackConfig:
     local: LocalProverConfig = field(default_factory=LocalProverConfig)
+    # Optional ENSEMBLE members (prover diversity). Each is a full
+    # LocalProverConfig — typically a different model on a different endpoint
+    # (e.g. DeepSeek-Prover-V2-7B, Kimina-Prover-RL). When non-empty, the loop
+    # runs `[local] + ensemble` as one EnsembleProver: their proposals are
+    # pooled per goal (the union closes more goals than any one model). TOML:
+    # `[[prover.ensemble]]` tables, one per extra model. Empty = single-model.
+    ensemble: list[LocalProverConfig] = field(default_factory=list)
     frontier: FrontierProverConfig = field(default_factory=FrontierProverConfig)
     # hard wall-clock budget per GOAL across tiers 0+1 (seconds; 0 = unlimited).
     # Without it one pathological goal (slow lake builds x 11 tactics x pass@N)
@@ -241,6 +248,14 @@ def _from_dict(cls: type, data: dict[str, Any]):
         ftype = hints[key]
         if isinstance(val, dict) and hasattr(ftype, "__dataclass_fields__"):
             kwargs[key] = _from_dict(ftype, val)
+        elif isinstance(val, list) and typing.get_origin(ftype) is list:
+            # list[SomeDataclass] (e.g. prover.ensemble): convert each element.
+            (elem_t,) = typing.get_args(ftype) or (None,)
+            if elem_t is not None and hasattr(elem_t, "__dataclass_fields__"):
+                kwargs[key] = [_from_dict(elem_t, v) if isinstance(v, dict) else v
+                               for v in val]
+            else:
+                kwargs[key] = val
         else:
             kwargs[key] = val
     return cls(**kwargs)

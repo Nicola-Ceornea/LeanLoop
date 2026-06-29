@@ -19,6 +19,7 @@ from .config import Config
 from .db import RunDB
 from .lean_runner import LeanRunner, theorem_signatures
 from .provers.base import Goal, ProofAttempt
+from .provers.ensemble import EnsembleProver
 from .provers.frontier import FrontierProver
 from .provers.ollama import LocalProver
 
@@ -39,7 +40,15 @@ class Orchestrator:
         self.config_path = config_path     # surfaced in queued-task instructions
         self.runner = LeanRunner(cfg.project)
         self.db = RunDB(cfg.db_path)
-        self.local = LocalProver(cfg.prover.local) if cfg.prover.local.enabled else None
+        # Local tier: a single LocalProver, or — when `[[prover.ensemble]]`
+        # members are configured — an EnsembleProver pooling `[local] + members`
+        # (prover diversity; their proposals are unioned per goal). Only members
+        # whose `enabled` is set join the pool.
+        self.local = None
+        if cfg.prover.local.enabled:
+            primary = LocalProver(cfg.prover.local)
+            extra = [LocalProver(c) for c in cfg.prover.ensemble if c.enabled]
+            self.local = EnsembleProver([primary, *extra]) if extra else primary
         fb = cfg.prover.frontier
         # `queue` is handled by the loop directly (enqueue), not a Prover.
         self.frontier = (FrontierProver(fb)

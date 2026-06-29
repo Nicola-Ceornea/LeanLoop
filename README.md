@@ -70,8 +70,9 @@ soundness gate is validated end-to-end against a real Lean toolchain
 
 **Roadmap (not yet implemented — named honestly):** Kimina-Lean-Server backend,
 per-theorem goal splitting + lemma-library harvesting, error-class-routed
-repair prompts, prover ensembling, Rust mutation / differential testing for
-spec assurance, QLoRA expert iteration. Listed again at the bottom.
+repair prompts, Rust mutation / differential testing for spec assurance, QLoRA
+expert iteration. (Prover ensembling is now **done** — `[[prover.ensemble]]`.)
+Listed again at the bottom.
 
 ---
 
@@ -441,7 +442,11 @@ information-flow are out of scope entirely.
 * per-theorem goal splitting + auxiliary-lemma harvesting into a project
   lemma library (`@[grind]`/`@[progress]`)
 * error-class-routed repair prompts (AutoVerus-style taxonomy from the run log)
-* prover ensembling (DeepSeek-Prover-V2-7B, Kimina-RL-1.7B fast tier)
+* prover ensembling (DeepSeek-Prover-V2-7B, Kimina-RL-1.7B fast tier): **done**
+  — `[[prover.ensemble]]` config tables + `EnsembleProver` pool diverse models
+  per goal (`leanloop/provers/ensemble.py`). Their proposals are unioned so the
+  ensemble closes more goals than pass@N on any one model, for the same budget;
+  members run concurrently and a down endpoint is skipped, not fatal.
 * Rust mutation testing + differential testing for spec assurance
   (statement-level negation probing + counterexample search: **done** — `leanloop vet`)
 * QLoRA expert iteration on the logged (goal, proof) corpus

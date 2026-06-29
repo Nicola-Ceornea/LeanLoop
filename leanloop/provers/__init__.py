@@ -3,5 +3,6 @@ and remote-GPU deployments differ only by `base_url` in config."""
 from .base import Prover, ProofAttempt
 from .ollama import LocalProver
 from .frontier import FrontierProver
+from .ensemble import EnsembleProver
 
-__all__ = ["Prover", "ProofAttempt", "LocalProver", "FrontierProver"]
+__all__ = ["Prover", "ProofAttempt", "LocalProver", "FrontierProver", "EnsembleProver"]
