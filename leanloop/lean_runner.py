@@ -8,7 +8,25 @@ The original file is restored from an on-disk backup in `finally`, and if the
 process is killed mid-run the backup is left next to the file for recovery.
 
 A Kimina-Lean-Server backend can replace this direct-`lake` runner later for
-throughput; the interface (`verify`) stays the same.
+throughput; the interface (`verify`) stays the same. TURN-KEY DESIGN for that
+backend (deferred — needs a running Kimina server to validate, not built blind):
+
+  * Add `[verifier] backend = "lake" | "kimina"` + `kimina_url` to config; the
+    orchestrator picks `LeanRunner` (lake) or a `KiminaRunner` exposing the SAME
+    `verify(candidate_file_text, theorem_fqns, *, module_stem) -> VerifyResult`.
+  * KiminaRunner POSTs the candidate to the server's batched check endpoint for
+    the fast BUILD verdict (`res.build_ok` + `res.errors` from the returned
+    messages) — that is the 1.5-2x win (a warm, persistent Lean session vs a
+    cold `lake build`).
+  * SOUNDNESS CONSTRAINT (do NOT skip): `verify` is the trust boundary, and a
+    proof is only sound if its AXIOM CLOSURE is checked (`#print axioms` per
+    FQN — the audit gate forbids `sorryAx` / unexpected axioms). If the Kimina
+    server cannot return the axiom closure, KiminaRunner MUST still run the
+    `#print axioms` leg (e.g. fall back to `lake env lean` for the checker
+    module, or a Kimina request that includes the `#print axioms` commands and
+    parses their output). A Kimina backend that returns build-only is UNSOUND
+    and must not be accepted. Validate the axiom-parse against the real server
+    before trusting it.
 """
 from __future__ import annotations
 
