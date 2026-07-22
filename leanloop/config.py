@@ -66,6 +66,9 @@ class LocalProverConfig:
     top_p: float = 0.95
     # Optional deterministic sampler seed.  None preserves the server default.
     seed: int | None = None
+    # Optional reasoning control for OpenAI-compatible endpoints.  Empty keeps
+    # legacy behavior; supported servers commonly accept none/low/medium/high.
+    reasoning_effort: str = ""
     max_tokens: int = 32768                  # Goedel generates plan + proof
     # context window requested from the server (Ollama default is tiny; Goedel
     # wants room for the file + plan + proof). Maps to Ollama `num_ctx`.

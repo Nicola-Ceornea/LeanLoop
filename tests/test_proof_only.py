@@ -46,6 +46,7 @@ def test_legacy_defaults_and_toml_profile_controls(tmp_path):
     assert defaults.prompt_profile == "goedel"
     assert defaults.keep_alive == "5m"
     assert defaults.seed is None
+    assert defaults.reasoning_effort == ""
 
     path = tmp_path / "leanloop.toml"
     path.write_text(textwrap.dedent("""
@@ -54,12 +55,14 @@ def test_legacy_defaults_and_toml_profile_controls(tmp_path):
         prompt_profile = "proof_only"
         keep_alive = "-1"
         seed = 42
+        reasoning_effort = "high"
     """))
     cfg = Config.load(path)
     assert cfg.prover.local.model == "leanstral"
     assert cfg.prover.local.prompt_profile == "proof_only"
     assert cfg.prover.local.keep_alive == "-1"
     assert cfg.prover.local.seed == 42
+    assert cfg.prover.local.reasoning_effort == "high"
 
 
 def test_proof_only_prompt_is_separate_and_candidate_is_spliced(monkeypatch):
@@ -148,6 +151,8 @@ def test_openai_payload_uses_distinct_system_and_user_messages():
     prover = LocalProver(LocalProverConfig(
         backend="openai",
         prompt_profile="proof_only",
+        seed=42,
+        reasoning_effort="high",
     ))
     client = _AsyncClient()
     asyncio.run(prover._generate(
@@ -157,3 +162,10 @@ def test_openai_payload_uses_distinct_system_and_user_messages():
         "system", "user",
     ]
     assert client.kwargs["json"]["messages"][1]["content"] == "Goal to close: t"
+    assert client.kwargs["json"]["seed"] == 42
+    assert client.kwargs["json"]["reasoning_effort"] == "high"
+
+
+def test_invalid_reasoning_effort_is_rejected():
+    with pytest.raises(ValueError, match="unknown reasoning_effort"):
+        LocalProver(LocalProverConfig(reasoning_effort="maximum"))

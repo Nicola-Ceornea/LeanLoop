@@ -663,6 +663,7 @@ def cmd_bench(args) -> int:
             "temperatures": lp.temperatures,
             "top_p": lp.top_p,
             "seed": lp.seed,
+            "reasoning_effort": lp.reasoning_effort,
             "max_tokens": lp.max_tokens,
             "num_ctx": lp.num_ctx,
             "concurrency": lp.concurrency,

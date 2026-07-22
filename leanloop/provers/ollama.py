@@ -65,6 +65,11 @@ class LocalProver:
                 f"unknown local prover prompt_profile {cfg.prompt_profile!r}; "
                 "expected 'goedel' or 'proof_only'"
             )
+        if cfg.reasoning_effort not in ("", "none", "low", "medium", "high"):
+            raise ValueError(
+                f"unknown reasoning_effort {cfg.reasoning_effort!r}; expected "
+                "'', 'none', 'low', 'medium', or 'high'"
+            )
         self.cfg = cfg
         # Aligned with the candidates returned by the most recent propose().
         # The Prover protocol intentionally remains list[str] for compatibility;
@@ -139,9 +144,16 @@ class LocalProver:
             import time as _t
             t0 = _t.time()
             headers = {"Authorization": f"Bearer {self.cfg.api_key}"} if self.cfg.api_key else {}
-            r = client.post(f"{url}/v1/chat/completions", headers=headers, json={
+            request = {
                 "model": self.cfg.model, "messages": self._messages(prompt),
-                "temperature": temperature, "max_tokens": self.cfg.max_tokens})
+                "temperature": temperature, "top_p": self.cfg.top_p,
+                "max_tokens": self.cfg.max_tokens,
+            }
+            if self.cfg.seed is not None:
+                request["seed"] = self.cfg.seed
+            if self.cfg.reasoning_effort:
+                request["reasoning_effort"] = self.cfg.reasoning_effort
+            r = client.post(f"{url}/v1/chat/completions", headers=headers, json=request)
             r.raise_for_status()
             d = r.json()
             dt = max(_t.time() - t0, 1e-6)
@@ -177,6 +189,7 @@ class LocalProver:
                         "prompt_profile": self.cfg.prompt_profile,
                         "temperature": temp,
                         "seed": self.cfg.seed,
+                        "reasoning_effort": self.cfg.reasoning_effort,
                         "prompt_chars": len(prompt),
                     }
                     try:
@@ -300,6 +313,8 @@ class LocalProver:
         }
         if self.cfg.seed is not None:
             request["seed"] = self.cfg.seed
+        if self.cfg.reasoning_effort:
+            request["reasoning_effort"] = self.cfg.reasoning_effort
         r = await client.post(
             f"{self.cfg.base_url.rstrip('/')}/v1/chat/completions",
             headers=headers,

@@ -303,6 +303,9 @@ Native Ollama endpoints may also set `keep_alive = "30m"` to avoid reloading a
 large model between cases and `seed = 42` for a reproducible sampling stream.
 Use `--skip-throughput` for subsequent warm runs and `--limit N` for a smoke
 test; the complete manifest is still validated before the limit is applied.
+For reasoning-capable OpenAI-compatible endpoints, set
+`reasoning_effort = "high"`; receipts record it separately so high- and
+no-reasoning results are never conflated.
 
 - **`doctor`** checks the prover endpoint, whether the model is actually
   GPU-resident (Ollama `/api/ps` — catches the silent partial-CPU slowdown),
