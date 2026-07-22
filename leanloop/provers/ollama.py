@@ -8,6 +8,7 @@ Nothing else in the loop is aware of where the model runs.
 from __future__ import annotations
 
 import asyncio
+import textwrap
 import time
 
 import httpx
@@ -332,5 +333,17 @@ class LocalProver:
         for fence in ("```lean4", "```lean", "```"):
             if fence in text:
                 after = text.split(fence, 1)[1]
-                return after.split("```", 1)[0].strip()
+                body = after.split("```", 1)[0].strip()
+                if body.startswith("by") and (
+                    len(body) == 2 or body[2].isspace()
+                ):
+                    return body
+                # Leanstral sometimes treats ``by sorry`` as an editor hole and
+                # emits just the fenced tactic sequence.  A fence is an explicit
+                # code boundary, so wrapping that body is unambiguous; unfenced
+                # prose remains untouched and is rejected by the trusted-hole
+                # gate rather than guessed into code.
+                if body:
+                    return "by\n" + textwrap.indent(body, "  ")
+                return body
         return text.strip()

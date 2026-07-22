@@ -98,6 +98,15 @@ def test_proof_only_fails_closed_without_a_trusted_hole():
         prover.propose(goal)
 
 
+def test_fenced_tactic_body_is_wrapped_but_unfenced_prose_is_not():
+    assert LocalProver._extract_proof(
+        "```lean\nhave h : True := by trivial\nexact h\n```"
+    ) == "by\n  have h : True := by trivial\n  exact h"
+    assert LocalProver._extract_proof("Here is the proof: exact True.intro") == (
+        "Here is the proof: exact True.intro"
+    )
+
+
 class _Response:
     def raise_for_status(self):
         return None
