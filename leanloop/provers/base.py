@@ -52,7 +52,7 @@ class Goal:
 class ProofAttempt:
     """A single candidate proof + how it did."""
     goal_name: str
-    tier: str                    # "tactic" | "local" | "frontier"
+    tier: str                    # "tactic" | "local" | "frontier" | "agent"
     proof_text: str              # the full Lean file the candidate produced
     accepted: bool = False
     # diagnostics

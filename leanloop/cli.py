@@ -8,7 +8,7 @@
     leanloop stats        [-c cfg]            run-log summary
     leanloop doctor       [-c cfg]            preflight health check (prover/GPU/lean/disk)
     leanloop status       [-c cfg] [--watch]  live status + liveness of the current run
-    leanloop bench        [-c cfg] [--samples N] [--goals M] [--suite FILE]
+    leanloop bench        [-c cfg] [--samples N] [--goals M] [--suite FILE] [--agentic]
                                               measure prover tok/s + local close-rate
     leanloop vet MODULE   [-c cfg] [--explain] spec-assurance probes + English review
     leanloop kat [MODULE] [-c cfg] [--vectors F]  run spec on official test vectors (byte-eq)
@@ -601,6 +601,37 @@ def cmd_bench(args) -> int:
     report_path = getattr(args, "report", "") or ""
     preflight_only = bool(getattr(args, "preflight_only", False))
     skip_throughput = bool(getattr(args, "skip_throughput", False))
+    agentic = bool(getattr(args, "agentic", False))
+
+    if agentic:
+        agent_cfg = cfg.benchmark.agent
+        if not suite_path:
+            console.print("[red]--agentic requires a held-out --suite[/]")
+            return 2
+        if not report_path:
+            console.print("[red]--agentic requires --report for atomic proof-free checkpoints[/]")
+            return 2
+        if preflight_only:
+            console.print("[red]--agentic and --preflight-only are mutually exclusive[/]")
+            return 2
+        if args.goals:
+            console.print("[red]--agentic cannot run against live --goals; use a held-out suite[/]")
+            return 2
+        if not agent_cfg.enabled or not agent_cfg.argv or not agent_cfg.argv[0]:
+            console.print(
+                "[red]--agentic requires [benchmark.agent] enabled=true and a non-empty argv[/]"
+            )
+            return 2
+        if (
+            agent_cfg.trajectories < 1
+            or agent_cfg.timeout_s <= 0
+            or agent_cfg.terminate_grace_s < 0
+        ):
+            console.print(
+                "[red][benchmark.agent] trajectories/timeout_s must be positive and "
+                "terminate_grace_s cannot be negative[/]"
+            )
+            return 2
 
     prepared = []
     if suite_path:
@@ -633,9 +664,13 @@ def cmd_bench(args) -> int:
     toolchain_path = project_root / "lean-toolchain"
     suite_bytes = Path(suite_path).resolve().read_bytes() if suite_path else b""
     receipt = {
-        "schema": "leanloop-proof-replay-benchmark-v1",
+        "schema": (
+            "leanloop-agent-proof-replay-benchmark-v1"
+            if agentic else "leanloop-proof-replay-benchmark-v1"
+        ),
         "started_at": datetime.now(timezone.utc).isoformat(),
         "scope": "internal proof-replay benchmark; not training-decontaminated",
+        "mode": "external-agent" if agentic else "local-prover",
         "suite": {
             "path": str(Path(suite_path).resolve()) if suite_path else "",
             "sha256": hashlib.sha256(suite_bytes).hexdigest() if suite_bytes else "",
@@ -654,7 +689,7 @@ def cmd_bench(args) -> int:
             "commit": git_output(leanloop_root, "rev-parse", "HEAD"),
             "dirty": bool(git_output(leanloop_root, "status", "--porcelain")),
         },
-        "prover": {
+        "prover": {} if agentic else {
             "backend": lp.backend,
             "base_url": lp.base_url,
             "model": lp.model,
@@ -681,13 +716,19 @@ def cmd_bench(args) -> int:
             "heldout_cases_override_project_whitelist": bool(prepared),
         },
         "model_registry": {},
+        "agent": {},
         "throughput": {},
         "preflight": [],
         "results": [],
         "summary": {},
     }
 
-    if lp.backend == "ollama":
+    if agentic:
+        from .agent_bench import agent_config_receipt
+
+        receipt["agent"] = agent_config_receipt(cfg.benchmark.agent)
+
+    if not agentic and lp.backend == "ollama":
         try:
             tags = httpx.get(f"{lp.base_url.rstrip('/')}/api/tags", timeout=10)
             tags.raise_for_status()
@@ -799,6 +840,95 @@ def cmd_bench(args) -> int:
             receipt["summary"] = {"preflight_valid": len(prepared), "preflight_invalid": 0}
             write_receipt()
             return 0
+
+    # ---- Agent mode: independent full coding-agent trajectories ----
+    if agentic:
+        from .agent_bench import run_agent_trajectory
+
+        console.rule(
+            f"held-out external agent ({len(prepared)} cases × "
+            f"{cfg.benchmark.agent.trajectories} trajectories)"
+        )
+        console.print(
+            "[dim]each trajectory uses a fresh Git-free detached project copy; only the "
+            "target module is harvested and rechecked in the trusted project[/]"
+        )
+        receipt["throughput"] = {
+            "skipped": True,
+            "reason": "external-agent trajectories include tool and verifier turns",
+        }
+        cfg.db_path = ":memory:"
+        cfg.prover.local.enabled = False
+        cfg.prover.frontier.enabled = False
+        orch = Orchestrator(cfg, config_path=_config_path(args) or "")
+        accepted_by_case: dict[str, bool] = {item.case.id: False for item in prepared}
+        trajectory_accepts = 0
+        infrastructure_failures = 0
+        try:
+            for item in prepared:
+                for trajectory in range(1, cfg.benchmark.agent.trajectories + 1):
+                    result = run_agent_trajectory(
+                        cfg.project,
+                        item,
+                        cfg.benchmark.agent,
+                        trajectory=trajectory,
+                        submit=lambda candidate, sampling, item=item: orch.submit(
+                            item.goal,
+                            candidate,
+                            module_stem=item.module_stem,
+                            model=cfg.benchmark.agent.model_label,
+                            tier="agent",
+                            sampling=sampling,
+                        ),
+                    )
+                    accepted_by_case[item.case.id] |= result.accepted
+                    trajectory_accepts += int(result.accepted)
+                    infrastructure_failures += int(
+                        result.status in {"setup_failed", "trusted_source_changed"}
+                    )
+                    receipt["results"].append({
+                        "id": item.case.id,
+                        "module": item.module_stem,
+                        "theorem": item.case.theorem,
+                        "category": item.case.category,
+                        "difficulty": item.case.difficulty,
+                        "source_sha256": item.case.source_sha256,
+                        "proof_sha256": item.case.proof_sha256,
+                        "axiom_whitelist": list(item.case.axiom_whitelist),
+                        **result.receipt(),
+                    })
+                    # Atomic checkpoint after every independent trajectory.  A
+                    # crash loses at most the currently running trajectory.
+                    write_receipt(final=False, announce=False)
+                    mark = "✓" if result.accepted else "✗"
+                    console.print(
+                        f"  {mark} {item.case.id} trajectory {trajectory} "
+                        f"[{result.status}] {result.wall_s:.0f}s"
+                    )
+        finally:
+            orch.close()  # accepted proof text lived only in the in-memory DB
+
+        closed = sum(accepted_by_case.values())
+        total_trajectories = len(prepared) * cfg.benchmark.agent.trajectories
+        receipt["summary"] = {
+            "cases": len(prepared),
+            "closed": closed,
+            "open": len(prepared) - closed,
+            "pass_at_k": round(100 * closed / len(prepared), 1),
+            "trajectories_per_case": cfg.benchmark.agent.trajectories,
+            "trajectory_accepts": trajectory_accepts,
+            "total_trajectories": total_trajectories,
+            "infrastructure_failures": infrastructure_failures,
+            "preflight_valid": len(prepared),
+            "preflight_invalid": 0,
+        }
+        write_receipt()
+        console.print(
+            f"\n[bold]agent pass@{cfg.benchmark.agent.trajectories}: "
+            f"{receipt['summary']['pass_at_k']}%[/] ({closed}/{len(prepared)} cases); "
+            f"{trajectory_accepts}/{total_trajectories} trajectories accepted"
+        )
+        return 1 if infrastructure_failures else 0
 
     if not lp.enabled:
         console.print("[red]local prover disabled in config — nothing to benchmark[/]")
@@ -1109,6 +1239,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="skip the raw generation probe (useful after model warm-up)")
     sb.add_argument("--preflight-only", action="store_true",
                     help="validate suite hashes, gold closure, and masked builds without inference")
+    sb.add_argument("--agentic", action="store_true",
+                    help="run configured [benchmark.agent] coding-agent trajectories")
     sv = sub.add_parser("vet", parents=[common],
                         help="spec-assurance probes (counterexample/vacuity/negation) + LLM explain")
     sv.add_argument("module", help="dotted module whose theorems to vet")

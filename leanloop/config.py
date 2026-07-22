@@ -207,6 +207,33 @@ class MutateConfig:
 
 
 # --------------------------------------------------------------------------- #
+# Held-out external-agent benchmark (disabled unless explicitly selected)
+# --------------------------------------------------------------------------- #
+@dataclass
+class AgentBenchmarkConfig:
+    """A generic command-line coding agent used only by ``bench --agentic``.
+
+    ``argv`` is executed directly (never through a shell) in a fresh detached
+    project copy.  The proof task is supplied on stdin.  A wrapper such as
+    bubblewrap/OCI may be the first argv element when OS-level isolation is
+    required; LeanLoop's own copy boundary protects project state but is not a
+    host sandbox.
+    """
+
+    enabled: bool = False
+    argv: list[str] = field(default_factory=list)
+    model_label: str = "external-agent"
+    trajectories: int = 1
+    timeout_s: float = 3600.0
+    terminate_grace_s: float = 2.0
+
+
+@dataclass
+class BenchmarkConfig:
+    agent: AgentBenchmarkConfig = field(default_factory=AgentBenchmarkConfig)
+
+
+# --------------------------------------------------------------------------- #
 # Top-level
 # --------------------------------------------------------------------------- #
 @dataclass
@@ -220,6 +247,7 @@ class Config:
     frontier_queue_dir: str = "leanloop_frontier_queue"
     kat: KatConfig = field(default_factory=KatConfig)
     mutate: MutateConfig = field(default_factory=MutateConfig)
+    benchmark: BenchmarkConfig = field(default_factory=BenchmarkConfig)
 
     # ------------------------------------------------------------------ #
     @staticmethod

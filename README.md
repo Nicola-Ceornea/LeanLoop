@@ -307,6 +307,45 @@ For reasoning-capable OpenAI-compatible endpoints, set
 `reasoning_effort = "high"`; receipts record it separately so high- and
 no-reasoning results are never conflated.
 
+To evaluate a coding agent (compiler/LSP/tool feedback and repair turns) rather
+than one-shot completions, configure an external argv and opt in explicitly:
+
+```toml
+[benchmark.agent]
+enabled = true
+# This executable must read the task from stdin. For CLIs whose --prompt takes
+# a literal argument (including Vibe), use a tiny exec-style stdin adapter.
+argv = ["lean-agent-stdin-wrapper"]
+model_label = "leanstral-1.5-high"
+trajectories = 1
+timeout_s = 7200
+terminate_grace_s = 2
+```
+
+```bash
+leanloop bench --suite benchmarks/project-50.toml --limit 5 \
+  --agentic --report agent-benchmark.json
+```
+
+The argv is executed directly (no shell), with the task on stdin and the cwd set
+to a fresh copy of the complete Lake project. Every `.git` entry is excluded,
+the target is overwritten with the masked scaffold, stale target build artifacts
+are removed, and a forced rebuild must show `sorryAx` before the agent starts.
+Only the target module is harvested; edits to helpers are discarded. The result
+is then checked against the trusted project by the same statement/source/kernel/
+axiom gates. Each trajectory is independent and checkpointed atomically in the
+proof-free report. The detached copy isolates normal cwd-relative edits, but it
+is not an OS sandbox: put `bwrap`, an OCI runner, or an equivalent wrapper first
+in `argv` when the agent must be prevented from reaching other host paths.
+Internal symlinks are materialized instead of preserved, so they cannot write
+through to another path in the trusted tree. Unresolved links, links escaping
+the project root, and aliases into `.git` fail closed. Projects that use an
+external dependency-cache symlink must first provide a self-contained snapshot
+inside the selected project root. Trajectories are sequential in this initial
+implementation. The runner retains agent stdout/stderr in memory until the
+process exits and writes only their fingerprints; sandbox wrappers should also
+bound output for agents that are not trusted to avoid high-volume output.
+
 - **`doctor`** checks the prover endpoint, whether the model is actually
   GPU-resident (Ollama `/api/ps` — catches the silent partial-CPU slowdown),
   the `lake` toolchain, disk, and the queue; non-zero exit on hard failures.

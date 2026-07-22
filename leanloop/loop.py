@@ -218,23 +218,26 @@ class Orchestrator:
 
     # ------------------------------------------------------------------ #
     def submit(self, goal: Goal, candidate: str, *, module_stem: str,
-               model: str = "interactive-frontier") -> ProofAttempt:
+               model: str = "interactive-frontier", tier: str = "frontier",
+               sampling: dict | None = None) -> ProofAttempt:
         """Verify a candidate produced OUTSIDE the loop (e.g. by an interactive
-        Claude Code session clearing the frontier queue) through the SAME gates.
-        Returns the attempt; the caller applies it on acceptance."""
+        frontier or a detached coding-agent trajectory) through the SAME gates.
+        Returns the attempt; the caller decides whether to apply it."""
         self._goal_hash = hashlib.sha256(goal.file_text.encode()).hexdigest()[:16]
         try:
             self._goal_sigs = self._pin_signatures(goal)
         except ValueError as exc:
-            att = ProofAttempt(goal_name=goal.name, tier="frontier", proof_text=candidate)
+            att = ProofAttempt(goal_name=goal.name, tier=tier, proof_text=candidate,
+                               model=model, sampling=sampling or {})
             att.lean_errors = str(exc)
             return att
         if not self._goal_sigs:
-            att = ProofAttempt(goal_name=goal.name, tier="frontier", proof_text=candidate)
+            att = ProofAttempt(goal_name=goal.name, tier=tier, proof_text=candidate,
+                               model=model, sampling=sampling or {})
             att.lean_errors = "goal declares no named theorem/lemma to pin"
             return att
-        return self._verify(goal, candidate, tier="frontier", module_stem=module_stem,
-                            model=model)
+        return self._verify(goal, candidate, tier=tier, module_stem=module_stem,
+                            model=model, sampling=sampling)
 
     # ------------------------------------------------------------------ #
     def _verify(self, goal: Goal, candidate: str, *, tier: str, module_stem: str,
