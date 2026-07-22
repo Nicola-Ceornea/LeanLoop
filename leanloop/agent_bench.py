@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import stat
@@ -361,14 +362,24 @@ def _assert_masked_build(
         checker.unlink(missing_ok=True)
 
 
-def _prompt(item: PreparedCase) -> str:
+def _prompt(project: ProjectConfig, item: PreparedCase) -> str:
     rel = Path(*item.module_stem.split(".")).with_suffix(".lean")
+    build_command = shlex.join(
+        [project.lake, "build", item.module_stem, *project.build_args]
+    )
     return (
-        "You are in a disposable detached Lean 4 Lake project.\n"
+        "You are running a headless held-out benchmark in a disposable detached "
+        "Lean 4 Lake project. Proceed immediately without asking for confirmation; "
+        "inspection, editing the target proof, and Lean/Lake commands are explicitly "
+        "authorized.\n"
         f"Prove exactly `{item.case.theorem}` in `{rel}`.\n"
-        "Replace its existing `by ... sorry` proof placeholder with a complete proof. "
+        "Read the target file before editing. Replace its existing `by ... sorry` proof "
+        "placeholder with a complete proof. "
         "Do not change its statement, imports, surrounding declarations, or any other file.\n"
-        "You may inspect the project and run Lean/Lake commands to repair the proof. "
+        "Use bash and Lean LSP feedback as needed to repair the proof, then verify it with "
+        f"`{build_command}`. Do not use `sorry`, `admit`, new axioms, `native_decide`, "
+        "or the theorem currently being proved. Do not commit. Finish only after the "
+        "target builds without proof placeholders.\n"
         "Only the target module will be harvested; every other edit is discarded, and the "
         "result will be checked independently through statement, source, kernel, and exact "
         "axiom-closure gates.\n"
@@ -534,7 +545,7 @@ def run_agent_trajectory(
                         returncode, timed_out, stdout, stderr = _run_agent(
                             cfg.argv,
                             cwd=workspace,
-                            prompt=_prompt(item),
+                            prompt=_prompt(project, item),
                             timeout_s=cfg.timeout_s,
                             terminate_grace_s=cfg.terminate_grace_s,
                         )

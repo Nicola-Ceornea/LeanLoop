@@ -14,6 +14,7 @@ import pytest
 
 from leanloop.agent_bench import (
     AgentTrajectoryResult,
+    _prompt,
     _require_masked_target_sorry_ax,
     _run_setup,
     agent_config_receipt,
@@ -138,6 +139,23 @@ raise SystemExit(42)
 """,
     )
     return root, ProjectConfig(root=str(root), lake=str(lake)), _prepared(root)
+
+
+def test_agent_prompt_pre_authorizes_headless_work_and_names_build(tmp_path):
+    _root, project, item = _project(tmp_path)
+    project.lake = "/opt/Lean Tools/lake"
+    project.build_args = ["--jobs", "2", "--label=held out"]
+
+    prompt = _prompt(project, item)
+
+    assert "headless held-out benchmark" in prompt
+    assert "Proceed immediately without asking for confirmation" in prompt
+    assert "editing the target proof" in prompt
+    assert (
+        "`'/opt/Lean Tools/lake' build Bench.Fixture --jobs 2 '--label=held out'`"
+        in prompt
+    )
+    assert "Do not use `sorry`, `admit`, new axioms, `native_decide`" in prompt
 
 
 def _orchestrator(root: Path) -> tuple[Orchestrator, _TrustedRunner]:
