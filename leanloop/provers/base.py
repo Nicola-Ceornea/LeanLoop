@@ -18,6 +18,34 @@ class Goal:
     file_text: str               # the full Lean file, with `sorry` where the proof goes
     target_module: str = ""      # Lean module to `lake build` for the kernel gate
     context: str = ""            # extra premises / plan to put in the prompt
+    # Optional held-out/proof-only plumbing.  `prompt_text` can omit a known
+    # proof even when `file_text` is the trusted candidate scaffold.
+    prompt_text: str = ""
+    target_fqns: list[str] = field(default_factory=list)
+    # Half-open character offsets [start, end) of the ONLY region a proof-only
+    # model may replace in `file_text`.
+    proof_hole: tuple[int, int] | None = None
+    # None inherits the project whitelist; [] explicitly permits no
+    # project-specific axioms.  Enforcement remains the orchestrator's job.
+    axiom_whitelist: list[str] | None = None
+
+    def materialize_proof(self, proof: str) -> str:
+        """Splice a proof term into the trusted scaffold's declared hole.
+
+        Proof-only models never get to regenerate imports, declarations, or a
+        theorem statement.  The caller supplies a precomputed half-open span,
+        and this method preserves every character outside it verbatim.
+        """
+        if self.proof_hole is None:
+            raise ValueError("proof-only materialization requires Goal.proof_hole")
+        start, end = self.proof_hole
+        if not (0 <= start <= end <= len(self.file_text)):
+            raise ValueError(
+                f"invalid proof hole [{start}, {end}) for {len(self.file_text)}-character scaffold"
+            )
+        if not proof.strip():
+            raise ValueError("cannot materialize an empty proof")
+        return self.file_text[:start] + proof.strip() + self.file_text[end:]
 
 
 @dataclass

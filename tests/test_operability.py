@@ -48,6 +48,21 @@ def test_last_activity_and_recent(tmp_path):
     db.close()
 
 
+def test_benchmark_attempt_receipt_hashes_diagnostics_and_omits_proof(tmp_path):
+    db = RunDB(str(tmp_path / "r.sqlite"))
+    attempt = _att("Heldout", "local")
+    attempt.proof_text = "by\n  secret_candidate"
+    attempt.lean_errors = "error at `secret_candidate`"
+    db.log(attempt)
+    (row,) = db.attempts_for("Heldout")
+    assert "proof_text" not in row
+    assert "lean_errors" not in row
+    assert row["lean_errors_chars"] == len(attempt.lean_errors)
+    assert len(row["lean_errors_sha256"]) == 64
+    assert "secret_candidate" not in repr(row)
+    db.close()
+
+
 def test_solved_skip_enables_resume(tmp_path):
     db = RunDB(str(tmp_path / "r.sqlite"))
     db.log(_att("Mod.Done", "tactic", accepted=True))

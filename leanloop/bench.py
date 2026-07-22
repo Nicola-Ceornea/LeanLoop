@@ -20,6 +20,17 @@ THROUGHPUT_PROMPT = """Complete the following Lean 4 code:
 Before producing the Lean 4 code to formally prove the given theorem, provide a detailed proof plan outlining the main proof steps and strategies.
 The plan should highlight key ideas, intermediate lemmas, and proof structures that will guide the construction of the final formal proof.""".format(THROUGHPUT_GOAL)
 
+PROOF_ONLY_THROUGHPUT_PROMPT = """Goal to close: bench_sample
+
+Trusted Lean context and goal:
+```lean
+{}
+```
+
+Return only the Lean proof term replacing `by sorry`, beginning with `by`.""".format(
+    THROUGHPUT_GOAL
+)
+
 
 def _median(xs: list[float]) -> float:
     if not xs:
@@ -54,6 +65,9 @@ def summarize_closerate(rows: list[dict]) -> dict:
     by_local = sum(1 for r in rows if r["accepted"] and r["tier"] == "local")
     closed = by_tactic + by_local
     walls = [r["wall_s"] for r in rows]
+    ordered_walls = sorted(walls)
+    p95 = (ordered_walls[max(0, int(len(ordered_walls) * 0.95 + 0.999999) - 1)]
+           if ordered_walls else 0.0)
     return {
         "goals": n,
         "closed": closed,
@@ -62,5 +76,6 @@ def summarize_closerate(rows: list[dict]) -> dict:
         "by_local_prover": by_local,
         "open": n - closed,
         "wall_s_median": round(_median(walls), 1),
+        "wall_s_p95": round(p95, 1),
         "wall_s_total": round(sum(walls), 1),
     }

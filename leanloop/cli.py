@@ -8,7 +8,7 @@
     leanloop stats        [-c cfg]            run-log summary
     leanloop doctor       [-c cfg]            preflight health check (prover/GPU/lean/disk)
     leanloop status       [-c cfg] [--watch]  live status + liveness of the current run
-    leanloop bench        [-c cfg] [--samples N] [--goals M]
+    leanloop bench        [-c cfg] [--samples N] [--goals M] [--suite FILE]
                                               measure prover tok/s + local close-rate
     leanloop vet MODULE   [-c cfg] [--explain] spec-assurance probes + English review
     leanloop kat [MODULE] [-c cfg] [--vectors F]  run spec on official test vectors (byte-eq)
@@ -579,12 +579,226 @@ def cmd_necessity(args) -> int:
 
 
 def cmd_bench(args) -> int:
-    """Phase-0 benchmark: prover tokens/sec on this GPU + local-tier close-rate."""
+    """Phase-0 benchmark: throughput plus a gated live- or held-out close-rate."""
+    import hashlib
+    import json
+    import os
+    import subprocess
+    import tempfile
     import time
+    from dataclasses import replace
+    from datetime import datetime, timezone
+
     from . import bench as B
+    from . import audit
+    from .heldout import HeldoutError, load_suite
+    from .lean_runner import LeanRunner
 
     cfg = _load(args)
     lp = cfg.prover.local
+    suite_path = getattr(args, "suite", "") or ""
+    limit = max(0, getattr(args, "limit", 0) or 0)
+    report_path = getattr(args, "report", "") or ""
+    preflight_only = bool(getattr(args, "preflight_only", False))
+    skip_throughput = bool(getattr(args, "skip_throughput", False))
+
+    prepared = []
+    if suite_path:
+        try:
+            prepared = load_suite(cfg.project.root, suite_path)
+        except HeldoutError as exc:
+            console.print(f"[red]invalid held-out suite: {exc}[/]")
+            return 2
+        if limit:
+            prepared = prepared[:limit]
+        if not prepared:
+            console.print("[red]held-out suite selected zero cases[/]")
+            return 2
+    elif preflight_only:
+        console.print("[red]--preflight-only requires --suite[/]")
+        return 2
+
+    def git_output(root: Path, *git_args: str) -> str:
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(root), *git_args], capture_output=True,
+                text=True, timeout=10,
+            )
+            return result.stdout.strip() if result.returncode == 0 else ""
+        except Exception:
+            return ""
+
+    project_root = Path(cfg.project.root).resolve()
+    leanloop_root = Path(__file__).resolve().parent.parent
+    toolchain_path = project_root / "lean-toolchain"
+    suite_bytes = Path(suite_path).resolve().read_bytes() if suite_path else b""
+    receipt = {
+        "schema": "leanloop-proof-replay-benchmark-v1",
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "scope": "internal proof-replay benchmark; not training-decontaminated",
+        "suite": {
+            "path": str(Path(suite_path).resolve()) if suite_path else "",
+            "sha256": hashlib.sha256(suite_bytes).hexdigest() if suite_bytes else "",
+            "cases": len(prepared),
+        },
+        "project": {
+            "root": str(project_root),
+            "commit": git_output(project_root, "rev-parse", "HEAD"),
+            "dirty": bool(git_output(project_root, "status", "--porcelain")),
+            "lean_toolchain": (
+                toolchain_path.read_text().strip() if toolchain_path.exists() else ""
+            ),
+        },
+        "leanloop": {
+            "root": str(leanloop_root),
+            "commit": git_output(leanloop_root, "rev-parse", "HEAD"),
+            "dirty": bool(git_output(leanloop_root, "status", "--porcelain")),
+        },
+        "prover": {
+            "backend": lp.backend,
+            "base_url": lp.base_url,
+            "model": lp.model,
+            "prompt_profile": lp.prompt_profile,
+            "samples": lp.samples,
+            "temperatures": lp.temperatures,
+            "top_p": lp.top_p,
+            "seed": lp.seed,
+            "max_tokens": lp.max_tokens,
+            "num_ctx": lp.num_ctx,
+            "concurrency": lp.concurrency,
+            "self_correct_rounds": lp.self_correct_rounds,
+            "goal_timeout_s": cfg.prover.goal_timeout_s,
+            "keep_alive": lp.keep_alive,
+            "tactic_battery": cfg.prover.tactic_battery,
+        },
+        "audit_policy": {
+            "forbid_sorry": cfg.audit.forbid_sorry,
+            "forbid_new_axioms": cfg.audit.forbid_new_axioms,
+            "forbid_native_decide": cfg.audit.forbid_native_decide,
+            "allowed_kernel_axioms": cfg.audit.allowed_kernel_axioms,
+            "project_axiom_whitelist": cfg.audit.axiom_whitelist,
+            "heldout_cases_override_project_whitelist": bool(prepared),
+        },
+        "model_registry": {},
+        "throughput": {},
+        "preflight": [],
+        "results": [],
+        "summary": {},
+    }
+
+    if lp.backend == "ollama":
+        try:
+            tags = httpx.get(f"{lp.base_url.rstrip('/')}/api/tags", timeout=10)
+            tags.raise_for_status()
+            models = tags.json().get("models", [])
+            match = next((m for m in models if m.get("name") == lp.model), None)
+            if match is None:
+                match = next((m for m in models if lp.model in m.get("name", "")), {})
+            receipt["model_registry"] = {
+                key: match.get(key) for key in ("name", "model", "digest", "size", "modified_at")
+                if match.get(key) is not None
+            }
+        except Exception as exc:
+            receipt["model_registry"] = {"error": str(exc)}
+
+    def write_receipt(*, final: bool = True, announce: bool = True) -> None:
+        if not report_path:
+            return
+        target = Path(report_path).resolve()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(timezone.utc).isoformat()
+        if final:
+            receipt["finished_at"] = timestamp
+            receipt.pop("checkpointed_at", None)
+        else:
+            receipt["checkpointed_at"] = timestamp
+        temp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+        try:
+            temp.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+            temp.replace(target)
+        finally:
+            if temp.exists():
+                temp.unlink()
+        if announce:
+            console.print(f"[dim]benchmark receipt: {target}[/]")
+
+    # A held-out suite is validated twice before inference: static byte/hash
+    # checks in load_suite(), then the gold theorem's kernel+axiom closure and
+    # the masked scaffold's ability to elaborate in the selected project.
+    if prepared:
+        console.rule(f"held-out preflight ({len(prepared)} cases)")
+        runner = LeanRunner(cfg.project)
+        bad = 0
+        for index, item in enumerate(prepared, 1):
+            source_check = audit.audit_source(item.gold_source, cfg.audit)
+            gold = runner.verify(
+                item.gold_source, [item.case.theorem], module_stem=item.module_stem
+            )
+            per_case_audit = replace(
+                cfg.audit, axiom_whitelist=list(item.case.axiom_whitelist)
+            )
+            closure = audit.audit_axioms(gold.axioms, per_case_audit, expected=1)
+            masked = runner.verify(item.scaffold, [], module_stem=item.module_stem)
+            ok = source_check.ok and gold.build_ok and closure.ok and masked.build_ok
+            bad += int(not ok)
+            error_parts = list(source_check.reasons) + list(closure.reasons)
+            if not gold.build_ok and gold.errors:
+                error_parts.append(gold.errors[-2000:])
+            if not masked.build_ok and masked.errors:
+                error_parts.append(masked.errors[-2000:])
+
+            def diagnostic_receipt(text: str) -> dict:
+                return {
+                    "chars": len(text),
+                    "sha256": hashlib.sha256(text.encode()).hexdigest() if text else "",
+                }
+
+            row = {
+                "id": item.case.id,
+                "module": item.module_stem,
+                "theorem": item.case.theorem,
+                "category": item.case.category,
+                "difficulty": item.case.difficulty,
+                "source_sha256": item.case.source_sha256,
+                "proof_sha256": item.case.proof_sha256,
+                "axiom_whitelist": list(item.case.axiom_whitelist),
+                "source_audit_ok": source_check.ok,
+                "gold_build_ok": gold.build_ok,
+                "gold_axiom_ok": closure.ok,
+                "gold_axioms": gold.axioms[-2000:],
+                "masked_build_ok": masked.build_ok,
+                "diagnostics": {
+                    "source_reasons": source_check.reasons,
+                    "axiom_reasons": closure.reasons,
+                    "gold_build": diagnostic_receipt(
+                        gold.errors if not gold.build_ok else ""
+                    ),
+                    "masked_build": diagnostic_receipt(
+                        masked.errors if not masked.build_ok else ""
+                    ),
+                    "combined_sha256": diagnostic_receipt("; ".join(error_parts))["sha256"],
+                },
+            }
+            receipt["preflight"].append(row)
+            write_receipt(final=False, announce=False)
+            mark = "✓" if ok else "✗"
+            color = "green" if ok else "red"
+            console.print(
+                f"  [{color}]{mark}[/] {index:02d} {item.case.id} "
+                f"({item.case.difficulty}, {item.case.theorem})"
+            )
+        if bad:
+            receipt["summary"] = {"preflight_valid": len(prepared) - bad,
+                                  "preflight_invalid": bad}
+            write_receipt()
+            console.print(f"[red]held-out preflight failed for {bad} case(s); no inference run[/]")
+            return 2
+        console.print(f"[green]all {len(prepared)} held-out cases passed preflight[/]")
+        if preflight_only:
+            receipt["summary"] = {"preflight_valid": len(prepared), "preflight_invalid": 0}
+            write_receipt()
+            return 0
+
     if not lp.enabled:
         console.print("[red]local prover disabled in config — nothing to benchmark[/]")
         return 2
@@ -595,62 +809,115 @@ def cmd_bench(args) -> int:
         return 1
 
     # ---- Phase A: raw throughput (no project needed) ----
-    console.rule("throughput probe")
-    console.print(f"model [bold]{lp.model}[/] @ {lp.base_url} — {args.samples} samples "
-                  f"(warming up first)…")
-    try:
-        prover.generate_timed(B.THROUGHPUT_PROMPT, temperature=0.7)  # warm-up (load model)
-    except Exception as e:
-        console.print(f"[red]generation failed: {e}[/]")
-        return 1
-    samples = []
-    for i in range(args.samples):
-        s = prover.generate_timed(B.THROUGHPUT_PROMPT, temperature=lp.temperatures[0])
-        samples.append(s)
-        console.print(f"  sample {i+1}: {s['gen_tps']:.1f} tok/s gen "
-                      f"({s['gen_toks']} toks, {s['total_s']:.1f}s)")
-    tp = B.summarize_throughput(samples)
-    console.print(f"\n[bold]generation: {tp['gen_tps_median']} tok/s median[/] "
-                  f"(mean {tp['gen_tps_mean']}, range {tp['gen_tps_min']}–{tp['gen_tps_max']}); "
-                  f"prompt {tp['prompt_tps_median']} tok/s; ~{tp['gen_toks_median']} toks/proof")
-    for m in prover.running():
-        vram, total = m.get("size_vram", 0), m.get("size", 0) or 1
-        pct = round(100 * vram / total)
-        tag = "GPU-resident" if pct >= 99 else "[red]PARTIAL CPU — speed is capped[/]"
-        console.print(f"residency: '{m.get('name')}' {pct}% on GPU ({tag})")
-    if tp["gen_tps_median"] > 0:
-        per = tp["gen_toks_median"] / tp["gen_tps_median"]
-        console.print(f"[dim]≈ {per:.0f}s per sample → pass@{lp.samples} ≈ "
-                      f"{per * lp.samples / max(lp.concurrency, 1) / 60:.0f} min/goal "
-                      f"at concurrency {lp.concurrency}[/]")
+    if not skip_throughput:
+        console.rule("throughput probe")
+        console.print(f"model [bold]{lp.model}[/] @ {lp.base_url} — {args.samples} samples "
+                      f"(warming up first)…")
+        tp_prompt = (B.PROOF_ONLY_THROUGHPUT_PROMPT
+                     if lp.prompt_profile == "proof_only" else B.THROUGHPUT_PROMPT)
+        try:
+            warmup = prover.generate_timed(tp_prompt, temperature=lp.temperatures[0])
+        except Exception as e:
+            receipt["throughput"] = {"error": str(e)}
+            write_receipt()
+            console.print(f"[red]generation failed: {e}[/]")
+            return 1
+        samples = []
+        for i in range(args.samples):
+            s = prover.generate_timed(tp_prompt, temperature=lp.temperatures[0])
+            samples.append(s)
+            console.print(f"  sample {i+1}: {s['gen_tps']:.1f} tok/s gen "
+                          f"({s['gen_toks']} toks, {s['total_s']:.1f}s)")
+        tp = B.summarize_throughput(samples)
+        receipt["throughput"] = {"warmup": {
+            k: warmup.get(k) for k in (
+                "gen_toks", "gen_tps", "prompt_toks", "prompt_tps", "total_s",
+                "load_s", "prompt_eval_s", "eval_s",
+            )
+        }, "summary": tp, "samples": [
+            {k: sample.get(k) for k in (
+                "gen_toks", "gen_tps", "prompt_toks", "prompt_tps", "total_s",
+                "load_s", "prompt_eval_s", "eval_s",
+            )} for sample in samples
+        ]}
+        write_receipt(final=False, announce=False)
+        console.print(f"\n[bold]generation: {tp['gen_tps_median']} tok/s median[/] "
+                      f"(mean {tp['gen_tps_mean']}, range "
+                      f"{tp['gen_tps_min']}–{tp['gen_tps_max']}); "
+                      f"prompt {tp['prompt_tps_median']} tok/s; "
+                      f"~{tp['gen_toks_median']} toks/proof")
+        for m in prover.running():
+            vram, total = m.get("size_vram", 0), m.get("size", 0) or 1
+            pct = round(100 * vram / total)
+            tag = "GPU-resident" if pct >= 99 else "[red]PARTIAL CPU — speed is capped[/]"
+            console.print(f"residency: '{m.get('name')}' {pct}% on GPU ({tag})")
+        if tp["gen_tps_median"] > 0:
+            per = tp["gen_toks_median"] / tp["gen_tps_median"]
+            console.print(f"[dim]≈ {per:.0f}s per sample → pass@{lp.samples} ≈ "
+                          f"{per * lp.samples / max(lp.concurrency, 1) / 60:.0f} min/goal "
+                          f"at concurrency {lp.concurrency}[/]")
+    else:
+        console.print("[dim]throughput probe skipped[/]")
 
     # ---- Phase B: close-rate over real goals (needs a project with sorries) ----
-    if args.goals and args.goals > 0:
-        found = goals_mod.scan(cfg.project.root)[: args.goals]
+    requested_live_goals = args.goals and args.goals > 0
+    if prepared or requested_live_goals:
+        found = prepared if prepared else goals_mod.scan(cfg.project.root)[: args.goals]
         if not found:
             console.print("\n[yellow]no goals (sorries) in the project — skipping close-rate. "
                           "Point project.root at an Aeneas Lean project to measure it.[/]")
         else:
-            console.rule(f"close-rate (local tier only, {len(found)} goals)")
+            label = "held-out proof replay" if prepared else "close-rate"
+            console.rule(f"{label} (local tier only, {len(found)} goals)")
             cfg.prover.frontier.enabled = False   # measure the LOCAL stack's yield
-            import tempfile
-            cfg.db_path = str(Path(tempfile.mkdtemp(prefix="leanloop-bench-")) / "bench.sqlite")
-            console.print(f"[dim]bench uses an ephemeral DB ({cfg.db_path}) — "
-                          f"probe results never pollute the production solved-cache[/]")
-            orch = Orchestrator(cfg, config_path=_config_path(args) or "")
             rows = []
-            try:
-                for dg in found:
-                    t0 = time.time()
-                    out = orch.prove(dg.goal, module_stem=dg.module_stem)
-                    rows.append({"tier": out.tier, "accepted": out.accepted,
-                                 "wall_s": time.time() - t0})
-                    mark = "✓" if out.accepted else "✗"
-                    console.print(f"  {mark} {dg.module_stem} [{out.tier or 'open'}] "
-                                  f"{rows[-1]['wall_s']:.0f}s")
-            finally:
-                orch.close()
+            with tempfile.TemporaryDirectory(prefix="leanloop-bench-") as tmp:
+                cfg.db_path = str(Path(tmp) / "bench.sqlite")
+                cfg.frontier_queue_dir = str(Path(tmp) / "queue")
+                console.print(f"[dim]bench uses ephemeral DB/queue under {tmp} — "
+                              f"probe results never pollute production state[/]")
+                orch = Orchestrator(cfg, config_path=_config_path(args) or "")
+                try:
+                    for item in found:
+                        dg = item.goal if prepared else item
+                        module_stem = item.module_stem
+                        t0 = time.time()
+                        out = orch.prove(dg, module_stem=module_stem)
+                        wall_s = time.time() - t0
+                        row = {"tier": out.tier, "accepted": out.accepted,
+                               "wall_s": wall_s}
+                        rows.append(row)
+                        attempts = orch.db.attempts_for(dg.name)
+                        result = {
+                            "id": dg.name,
+                            "module": module_stem,
+                            "accepted": out.accepted,
+                            "tier": out.tier,
+                            "wall_s": wall_s,
+                            "attempts": attempts,
+                        }
+                        if prepared:
+                            result.update({
+                                "theorem": item.case.theorem,
+                                "category": item.case.category,
+                                "difficulty": item.case.difficulty,
+                                "source_sha256": item.case.source_sha256,
+                                "proof_sha256": item.case.proof_sha256,
+                                "axiom_whitelist": list(item.case.axiom_whitelist),
+                            })
+                        receipt["results"].append(result)
+                        write_receipt(final=False, announce=False)
+                        mark = "✓" if out.accepted else "✗"
+                        console.print(f"  {mark} {dg.name} [{out.tier or 'open'}] "
+                                      f"{wall_s:.0f}s")
+                finally:
+                    orch.close()
             cr = B.summarize_closerate(rows)
+            receipt["summary"] = {
+                **cr,
+                "preflight_valid": len(prepared) if prepared else None,
+                "preflight_invalid": 0 if prepared else None,
+            }
             console.print(f"\n[bold]close-rate: {cr['close_rate']}%[/] "
                           f"({cr['closed']}/{cr['goals']}) — "
                           f"{cr['by_tactic']} by tactic battery, "
@@ -659,6 +926,7 @@ def cmd_bench(args) -> int:
     else:
         console.print("\n[dim]close-rate skipped (pass --goals N to measure it on the "
                       "project's sorries).[/]")
+    write_receipt()
     return 0
 
 
@@ -830,6 +1098,16 @@ def main(argv: list[str] | None = None) -> int:
     sb.add_argument("--samples", type=int, default=5, help="throughput probe samples")
     sb.add_argument("--goals", type=int, default=0,
                     help="also measure local close-rate over N project goals")
+    sb.add_argument("--suite", default="",
+                    help="held-out proof-replay suite manifest (TOML [[case]])")
+    sb.add_argument("--limit", type=int, default=0,
+                    help="run only the first N held-out cases (0 = all)")
+    sb.add_argument("--report", default="",
+                    help="write a proof-free JSON benchmark receipt")
+    sb.add_argument("--skip-throughput", action="store_true",
+                    help="skip the raw generation probe (useful after model warm-up)")
+    sb.add_argument("--preflight-only", action="store_true",
+                    help="validate suite hashes, gold closure, and masked builds without inference")
     sv = sub.add_parser("vet", parents=[common],
                         help="spec-assurance probes (counterexample/vacuity/negation) + LLM explain")
     sv.add_argument("module", help="dotted module whose theorems to vet")

@@ -4,6 +4,7 @@ Per the founding doc, this DB is what later QLoRA fine-tuning trains on.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import time
@@ -157,6 +158,35 @@ class RunDB:
             " FROM attempts ORDER BY id DESC LIMIT ?", (limit,))
         keys = ["ts", "goal_name", "tier", "accepted", "build_ok", "wall_clock_s", "lean_errors"]
         return [dict(zip(keys, r)) for r in cur.fetchall()]
+
+    def attempts_for(self, goal_name: str) -> list[dict]:
+        """Structured attempt telemetry for receipts, deliberately excluding
+        proof text.  Benchmark reports must never retain held-out gold proofs or
+        turn generated candidates into a second long-lived training corpus.
+        """
+        cur = self.conn.execute(
+            "SELECT tier, model, accepted, build_ok, audit_ok, wall_clock_s,"
+            " sampling, lean_errors, axioms FROM attempts"
+            " WHERE goal_name=? ORDER BY id", (goal_name,))
+        keys = ["tier", "model", "accepted", "build_ok", "audit_ok",
+                "verify_wall_s", "sampling", "lean_errors", "axioms"]
+        rows = []
+        for values in cur.fetchall():
+            row = dict(zip(keys, values))
+            try:
+                row["sampling"] = json.loads(row["sampling"] or "{}")
+            except json.JSONDecodeError:
+                row["sampling"] = {}
+            # Compiler diagnostics often quote the rejected source line.  A
+            # persistent benchmark receipt must not become a corpus of model
+            # candidates (or, during preflight, held-out gold proof fragments).
+            errors = row.pop("lean_errors") or ""
+            row["lean_errors_chars"] = len(errors)
+            row["lean_errors_sha256"] = (
+                hashlib.sha256(errors.encode()).hexdigest() if errors else ""
+            )
+            rows.append(row)
+        return rows
 
     def solved_proof(self, goal_name: str) -> str:
         """The accepted proof text for a solved goal (empty if none stored)."""

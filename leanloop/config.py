@@ -55,11 +55,17 @@ class LocalProverConfig:
     base_url: str = "http://localhost:11434"
     model: str = "goedel-prover-v2-8b"       # Ollama model tag (see docs)
     api_key: str = ""                        # for openai-compatible servers; usually unused
+    # "goedel" asks for a complete Lean file (legacy/default behavior).
+    # "proof_only" asks for one proof term and splices it into a trusted Goal
+    # scaffold; intended for Leanstral and held-out benchmarks.
+    prompt_profile: str = "goedel"            # "goedel" | "proof_only"
     # pass@N sampling budget per goal (whole-proof attempts).
     samples: int = 32
     # temperatures cycled across the N samples (decorrelates failures).
     temperatures: list[float] = field(default_factory=lambda: [0.7, 1.0, 1.2])
     top_p: float = 0.95
+    # Optional deterministic sampler seed.  None preserves the server default.
+    seed: int | None = None
     max_tokens: int = 32768                  # Goedel generates plan + proof
     # context window requested from the server (Ollama default is tiny; Goedel
     # wants room for the file + plan + proof). Maps to Ollama `num_ctx`.
@@ -81,6 +87,9 @@ class LocalProverConfig:
     # it to come back before giving up on the local tier for that goal. 0 = no
     # wait (skip the local tier immediately if unreachable).
     health_max_wait_s: float = 600.0
+    # Ollama model residency after each request.  "5m" is Ollama's existing
+    # default; use "-1" for a long benchmark or "0" to unload immediately.
+    keep_alive: str = "5m"
 
 
 @dataclass

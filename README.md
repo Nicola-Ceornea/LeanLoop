@@ -276,6 +276,34 @@ tmux new -s ll 'leanloop run --apply'   # survives SSH disconnect
 leanloop status --watch         # live: ALIVE/STALLED/FINISHED, done/total, last activity
 ```
 
+For a reproducible benchmark over theorems that are already proved, use a
+held-out proof-replay suite instead of adding `sorry` to the source tree:
+
+```bash
+leanloop bench --suite benchmarks/project-50.toml \
+  --report benchmark.json --samples 1
+# Validate hashes, gold axiom closures, and masked builds without loading a model:
+leanloop bench --suite benchmarks/project-50.toml \
+  --report preflight.json --preflight-only
+```
+
+Each `[[case]]` pins the module and fully-qualified theorem together with the
+source SHA-256, exact UTF-8 proof byte range and proof SHA-256, category,
+difficulty, and its reviewed axiom whitelist. LeanLoop replaces only that proof
+with a disposable mask, gives a proof-only model no text after the hole, and
+splices the returned `by ...` expression into the trusted scaffold before the
+normal statement, source, kernel, and exact-axiom gates. Benchmark databases
+and frontier queues are temporary; `--report` writes telemetry without proof
+text. This is an internal proof-replay benchmark, not a claim that historical
+public proofs were absent from model training.
+
+Chat-tuned proof models should use `prompt_profile = "proof_only"` under
+`[prover.local]`; the legacy Goedel full-file profile remains the default.
+Native Ollama endpoints may also set `keep_alive = "30m"` to avoid reloading a
+large model between cases and `seed = 42` for a reproducible sampling stream.
+Use `--skip-throughput` for subsequent warm runs and `--limit N` for a smoke
+test; the complete manifest is still validated before the limit is applied.
+
 - **`doctor`** checks the prover endpoint, whether the model is actually
   GPU-resident (Ollama `/api/ps` — catches the silent partial-CPU slowdown),
   the `lake` toolchain, disk, and the queue; non-zero exit on hard failures.

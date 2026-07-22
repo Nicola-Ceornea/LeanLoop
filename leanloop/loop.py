@@ -10,13 +10,14 @@ from __future__ import annotations
 
 import hashlib
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from rich.console import Console
 
 from . import audit, frontier_queue, tactic_battery
 from .config import Config
 from .db import RunDB
+from .heldout import discover_proof_spans
 from .lean_runner import LeanRunner, theorem_signatures
 from .provers.base import Goal, ProofAttempt
 from .provers.ensemble import EnsembleProver
@@ -58,6 +59,25 @@ class Orchestrator:
         self._goal_deadline: float | None = None   # per-goal wall-clock budget
         self._last_feedback: str = ""          # best local failure, for queued tasks
 
+    def _pin_signatures(self, goal: Goal) -> dict[str, str]:
+        """Return the exact declarations this goal is allowed to discharge.
+
+        Ordinary goals pin every theorem/lemma in the submitted file.  A
+        held-out benchmark goal uses a trusted scaffold and names one target
+        explicitly, so unrelated declarations in the source file neither
+        dilute its metric nor contaminate its axiom-closure result.
+        """
+        all_sigs = theorem_signatures(goal.file_text)
+        if not goal.target_fqns:
+            return all_sigs
+        missing = [name for name in goal.target_fqns if name not in all_sigs]
+        if missing:
+            raise ValueError(
+                "target theorem(s) missing from trusted goal scaffold: "
+                + ", ".join(missing)
+            )
+        return {name: all_sigs[name] for name in goal.target_fqns}
+
     # ------------------------------------------------------------------ #
     def prove(self, goal: Goal, *, module_stem: str) -> GoalOutcome:
         goal_hash = hashlib.sha256(goal.file_text.encode()).hexdigest()[:16]
@@ -76,7 +96,11 @@ class Orchestrator:
         # PIN the goal's theorems up front: a candidate is only accepted if it
         # proves EXACTLY these names with these (normalized) signatures. Without
         # this, a model could submit `theorem foo : True := trivial` and pass.
-        self._goal_sigs = theorem_signatures(goal.file_text)
+        try:
+            self._goal_sigs = self._pin_signatures(goal)
+        except ValueError as exc:
+            console.print(f"[red]✗ {goal.name}: {exc}[/]")
+            return GoalOutcome(goal.name, False)
         if not self._goal_sigs:
             console.print(f"[red]✗ {goal.name}: no named theorem/lemma to prove "
                           f"(goals must declare a `theorem`/`lemma`, not `example`)[/]")
@@ -165,14 +189,18 @@ class Orchestrator:
             label = f"{tier} round {rnd}" + (" (self-correct)" if rnd else "")
             console.print(f"[cyan]{label}: sampling…[/]")
             candidates = prover.propose(goal, feedback=feedback)
+            proposal_meta = getattr(prover, "last_metadata", [])
             best_errors = ""
-            for cand in candidates:
+            for idx, cand in enumerate(candidates):
                 if self._past_deadline():
                     console.print(f"[yellow]⏱ goal budget exhausted during {tier} round {rnd}[/]")
                     return GoalOutcome(goal.name, False)
+                sampling = {"round": rnd, "candidate": idx}
+                if idx < len(proposal_meta) and isinstance(proposal_meta[idx], dict):
+                    sampling.update(proposal_meta[idx])
                 att = self._verify(goal, cand, tier=tier, module_stem=module_stem,
                                    model=getattr(prover.cfg, "model", tier),
-                                   sampling={"round": rnd})
+                                   sampling=sampling)
                 if att.accepted:
                     console.print(f"[green]✓ closed by {tier}[/] (round {rnd})")
                     return GoalOutcome(goal.name, True, tier, cand)
@@ -195,7 +223,12 @@ class Orchestrator:
         Claude Code session clearing the frontier queue) through the SAME gates.
         Returns the attempt; the caller applies it on acceptance."""
         self._goal_hash = hashlib.sha256(goal.file_text.encode()).hexdigest()[:16]
-        self._goal_sigs = theorem_signatures(goal.file_text)
+        try:
+            self._goal_sigs = self._pin_signatures(goal)
+        except ValueError as exc:
+            att = ProofAttempt(goal_name=goal.name, tier="frontier", proof_text=candidate)
+            att.lean_errors = str(exc)
+            return att
         if not self._goal_sigs:
             att = ProofAttempt(goal_name=goal.name, tier="frontier", proof_text=candidate)
             att.lean_errors = "goal declares no named theorem/lemma to pin"
@@ -216,6 +249,35 @@ class Orchestrator:
             att.wall_clock_s = time.time() - t0
             self.db.log(att, goal_hash=self._goal_hash)
             return att
+
+        # Held-out benchmarks trust the checked-in scaffold, never a model's
+        # rewrite of imports, definitions, statements, or neighbouring proofs.
+        # Only the designated proof-hole byte range may differ.
+        if goal.proof_hole is not None:
+            start, end = goal.proof_hole
+            prefix, suffix = goal.file_text[:start], goal.file_text[end:]
+            if len(candidate) < len(prefix) + len(suffix):
+                return done("trusted scaffold: candidate is shorter than its fixed context")
+            inserted_end = len(candidate) - len(suffix) if suffix else len(candidate)
+            if candidate[:start] != prefix or candidate[inserted_end:] != suffix:
+                return done("trusted scaffold: candidate changed text outside the proof hole")
+            proof = candidate[start:inserted_end]
+            if not proof.startswith("by") or (len(proof) > 2 and not proof[2].isspace()):
+                return done("trusted scaffold: candidate is not one `by ...` proof expression")
+            if len(goal.target_fqns) != 1:
+                return done("trusted scaffold: proof-only goal must name exactly one target")
+            proof_start = len(candidate[:start].encode("utf-8"))
+            proof_end = len(candidate[:inserted_end].encode("utf-8"))
+            spans = [
+                span for span in discover_proof_spans(candidate)
+                if span.theorem == goal.target_fqns[0]
+            ]
+            if len(spans) != 1 or (
+                spans[0].proof_start, spans[0].proof_end
+            ) != (proof_start, proof_end):
+                return done(
+                    "trusted scaffold: candidate escapes the designated proof expression"
+                )
 
         # 1) STATEMENT-PINNING gate: the candidate must contain every goal
         # theorem with an identical normalized signature (name + binders + type).
@@ -243,7 +305,10 @@ class Orchestrator:
         if not res.build_ok:
             return done(res.errors)
 
-        ax = audit.audit_axioms(res.axioms, self.cfg.audit, expected=len(goal_fqns))
+        audit_cfg = self.cfg.audit
+        if goal.axiom_whitelist is not None:
+            audit_cfg = replace(audit_cfg, axiom_whitelist=list(goal.axiom_whitelist))
+        ax = audit.audit_axioms(res.axioms, audit_cfg, expected=len(goal_fqns))
         att.audit_ok = ax.ok
         att.accepted = att.build_ok and att.audit_ok
         if not ax.ok:
